@@ -820,7 +820,9 @@ def hoy(message):
                 "hora_orden": hora_orden
             })
 
-        juegos_ordenados.sort(key=lambda x: x["hora_orden"] if x["hora_orden"] else datetime.max)
+        juegos_ordenados.sort(
+            key=lambda x: x["hora_orden"] if x["hora_orden"] else datetime.max
+        )
 
         texto = f"📅 <b>JUEGOS DE HOY</b>\n"
         texto += f"🗓️ {fecha} | Hora de Venezuela\n\n"
@@ -832,11 +834,14 @@ def hoy(message):
             texto += f"⚾ Score: {j['score_away']} - {j['score_home']}\n\n"
 
         bot.delete_message(msg.chat.id, msg.message_id)
-        responder_largo(message.chat.id, texto, parse_mode="HTML")
+        responder_largo(message.chat.id, texto)
 
     except Exception as e:
-        bot.edit_message_text(f"❌ Error al cargar juegos: {str(e)[:120]}", msg.chat.id, msg.message_id)
-
+        bot.edit_message_text(
+            f"❌ Error al cargar juegos: {str(e)[:120]}",
+            msg.chat.id,
+            msg.message_id
+        )
 
 @bot.message_handler(commands=["pronosticos"])
 def pronosticos(message):
