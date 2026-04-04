@@ -1,5 +1,4 @@
 import os
-import re
 import csv
 import json
 import math
@@ -8,6 +7,7 @@ import requests
 import telebot
 from dotenv import load_dotenv
 from datetime import datetime, date, timedelta
+from functools import lru_cache
 
 try:
     from zoneinfo import ZoneInfo
@@ -150,8 +150,7 @@ def dividir_mensaje(texto, max_len=3900):
 
 
 def responder_largo(chat_id, texto, parse_mode=None):
-    partes = dividir_mensaje(texto)
-    for parte in partes:
+    for parte in dividir_mensaje(texto):
         bot.send_message(chat_id, parte, parse_mode=parse_mode)
 
 
@@ -347,41 +346,327 @@ def obtener_transacciones_hoy():
     return data.get("transactions", [])
 
 
+@lru_cache(maxsize=256)
+def obtener_stats_pitcher_reales(person_id, season=None):
+    if not person_id:
+        return {
+            "era": 4.20,
+            "whip": 1.30,
+            "so9": 8.2,
+            "ip": 0.0,
+            "sample_ok": False
+        }
+
+    if season is None:
+        season = temporada_actual()
+
+    url = f"{MLB_BASE}/people/{person_id}/stats"
+    params = {
+        "stats": "season",
+        "group": "pitching",
+        "season": season,
+        "gameType": "R"
+    }
+
+    data = safe_get(url, params=params)
+    splits = data.get("stats", [{}])[0].get("splits", [])
+
+    if not splits:
+        return {
+            "era": 4.20,
+            "whip": 1.30,
+            "so9": 8.2,
+            "ip": 0.0,
+            "sample_ok": False
+        }
+
+    stat = splits[0].get("stat", {})
+    era = float(stat.get("era", 4.20) or 4.20)
+    whip = float(stat.get("whip", 1.30) or 1.30)
+
+    innings_pitched = stat.get("inningsPitched", "0")
+    try:
+        ip = float(str(innings_pitched).replace(",", ""))
+    except Exception:
+        ip = 0.0
+
+    strikeouts = stat.get("strikeOuts", 0)
+    try:
+        strikeouts = int(strikeouts)
+    except Exception:
+        strikeouts = 0
+
+    so9 = (strikeouts * 9 / ip) if ip > 0 else 8.2
+
+    return {
+        "era": round(era, 2),
+        "whip": round(whip, 2),
+        "so9": round(so9, 2),
+        "ip": round(ip, 1),
+        "sample_ok": ip >= 10
+    }
+
+
+@lru_cache(maxsize=128)
+def obtener_venue_detalle(venue_id):
+    if not venue_id:
+        return {}
+
+    url = f"{MLB_BASE}/venues"
+    params = {"venueIds": str(venue_id)}
+    data = safe_get(url, params=params)
+    venues = data.get("venues", [])
+    return venues[0] if venues else {}
+
+
+@lru_cache(maxsize=128)
+def geocodificar_lugar(nombre_lugar):
+    if not nombre_lugar:
+        return None
+
+    url = "https://geocoding-api.open-meteo.com/v1/search"
+    params = {
+        "name": nombre_lugar,
+        "count": 1,
+        "language": "en",
+        "format": "json"
+    }
+    data = safe_get(url, params=params)
+    results = data.get("results", [])
+    if not results:
+        return None
+
+    r = results[0]
+    return {
+        "latitude": r.get("latitude"),
+        "longitude": r.get("longitude"),
+        "name": r.get("name"),
+        "country": r.get("country"),
+        "admin1": r.get("admin1")
+    }
+
+
+def extraer_coords_venue(venue):
+    if not venue:
+        return None
+
+    location = venue.get("location", {}) or {}
+    default_coords = location.get("defaultCoordinates", {}) or {}
+
+    lat = default_coords.get("latitude")
+    lon = default_coords.get("longitude")
+    if lat is not None and lon is not None:
+        return {"latitude": lat, "longitude": lon}
+
+    venue_name = venue.get("name", "")
+    city = location.get("city", "")
+    state = location.get("stateAbbrev", "") or location.get("state", "")
+    query = ", ".join([x for x in [venue_name, city, state] if x])
+
+    geo = geocodificar_lugar(query)
+    if geo:
+        return {"latitude": geo["latitude"], "longitude": geo["longitude"]}
+
+    return None
+
+
+def obtener_clima_partido(game):
+    try:
+        venue_id = game.get("venue", {}).get("id")
+        venue = obtener_venue_detalle(venue_id)
+        coords = extraer_coords_venue(venue)
+
+        if not coords:
+            return {
+                "temp_c": None,
+                "wind_kmh": None,
+                "wind_dir_deg": None,
+                "precip_mm": None,
+                "weather_code": None
+            }
+
+        game_date = game.get("gameDate")
+        if not game_date:
+            return {
+                "temp_c": None,
+                "wind_kmh": None,
+                "wind_dir_deg": None,
+                "precip_mm": None,
+                "weather_code": None
+            }
+
+        dt_utc = datetime.fromisoformat(game_date.replace("Z", "+00:00"))
+
+        url = "https://api.open-meteo.com/v1/forecast"
+        params = {
+            "latitude": coords["latitude"],
+            "longitude": coords["longitude"],
+            "hourly": "temperature_2m,precipitation,weather_code,wind_speed_10m,wind_direction_10m",
+            "timezone": "auto",
+            "forecast_days": 2
+        }
+        data = safe_get(url, params=params)
+        hourly = data.get("hourly", {})
+
+        times = hourly.get("time", [])
+        temps = hourly.get("temperature_2m", [])
+        precs = hourly.get("precipitation", [])
+        codes = hourly.get("weather_code", [])
+        winds = hourly.get("wind_speed_10m", [])
+        wind_dirs = hourly.get("wind_direction_10m", [])
+
+        if not times:
+            return {
+                "temp_c": None,
+                "wind_kmh": None,
+                "wind_dir_deg": None,
+                "precip_mm": None,
+                "weather_code": None
+            }
+
+        mejor_idx = 0
+        menor_diff = None
+
+        for i, t in enumerate(times):
+            try:
+                dt_local = datetime.fromisoformat(t)
+                diff = abs((dt_local.replace(tzinfo=None) - dt_utc.replace(tzinfo=None)).total_seconds())
+                if menor_diff is None or diff < menor_diff:
+                    menor_diff = diff
+                    mejor_idx = i
+            except Exception:
+                continue
+
+        return {
+            "temp_c": temps[mejor_idx] if mejor_idx < len(temps) else None,
+            "wind_kmh": winds[mejor_idx] if mejor_idx < len(winds) else None,
+            "wind_dir_deg": wind_dirs[mejor_idx] if mejor_idx < len(wind_dirs) else None,
+            "precip_mm": precs[mejor_idx] if mejor_idx < len(precs) else None,
+            "weather_code": codes[mejor_idx] if mejor_idx < len(codes) else None
+        }
+
+    except Exception as e:
+        print(f"Error obteniendo clima del partido: {e}")
+        return {
+            "temp_c": None,
+            "wind_kmh": None,
+            "wind_dir_deg": None,
+            "precip_mm": None,
+            "weather_code": None
+        }
+
+
 # =========================================================
 # MODELO PRO
 # =========================================================
-def pitcher_score_from_name(pitcher_name):
-    if not pitcher_name or pitcher_name == "TBD":
-        return -0.35
+def score_pitcher_real(stats):
+    era = stats.get("era", 4.20)
+    whip = stats.get("whip", 1.30)
+    so9 = stats.get("so9", 8.2)
+    ip = stats.get("ip", 0.0)
+    sample_ok = stats.get("sample_ok", False)
 
-    nombre = pitcher_name.lower()
+    score = 0.0
 
-    elite_keywords = [
-        "cole", "wheeler", "burnes", "skubal", "glasnow",
-        "castillo", "gallen", "yamamoto", "strider"
-    ]
-    good_keywords = [
-        "cease", "peralta", "lopez", "kirby", "valdez",
-        "buehler", "gausman", "senga", "gray"
-    ]
-    weak_keywords = [
-        "bullpen", "opener"
-    ]
+    if era <= 2.80:
+        score += 0.32
+    elif era <= 3.40:
+        score += 0.22
+    elif era <= 4.00:
+        score += 0.10
+    elif era <= 4.60:
+        score += 0.00
+    else:
+        score -= 0.14
 
-    for k in elite_keywords:
-        if k in nombre:
-            return 0.28
-    for k in good_keywords:
-        if k in nombre:
-            return 0.14
-    for k in weak_keywords:
-        if k in nombre:
-            return -0.18
+    if whip <= 1.05:
+        score += 0.20
+    elif whip <= 1.18:
+        score += 0.12
+    elif whip <= 1.30:
+        score += 0.04
+    elif whip <= 1.40:
+        score += 0.00
+    else:
+        score -= 0.10
 
-    return 0.00
+    if so9 >= 10.5:
+        score += 0.12
+    elif so9 >= 9.0:
+        score += 0.08
+    elif so9 >= 8.0:
+        score += 0.03
+    elif so9 < 6.5:
+        score -= 0.05
+
+    if not sample_ok or ip < 10:
+        score *= 0.75
+
+    return round(score, 3)
 
 
-def calcular_probabilidad_local_pro(away_team, home_team, standings, away_pitcher="TBD", home_pitcher="TBD"):
+def ajuste_clima_total(weather):
+    if not weather:
+        return 0.0
+
+    temp_c = weather.get("temp_c")
+    wind_kmh = weather.get("wind_kmh")
+    precip_mm = weather.get("precip_mm")
+    weather_code = weather.get("weather_code")
+
+    adj = 0.0
+
+    if temp_c is not None:
+        if temp_c >= 28:
+            adj += 0.35
+        elif temp_c >= 24:
+            adj += 0.20
+        elif temp_c <= 10:
+            adj -= 0.30
+        elif temp_c <= 15:
+            adj -= 0.15
+
+    if wind_kmh is not None:
+        if wind_kmh >= 25:
+            adj += 0.20
+        elif wind_kmh >= 18:
+            adj += 0.10
+
+    if precip_mm is not None and precip_mm >= 1.0:
+        adj -= 0.20
+
+    if weather_code is not None and weather_code >= 50:
+        adj -= 0.10
+
+    return round(adj, 2)
+
+
+def ajuste_clima_ml(weather):
+    if not weather:
+        return 0.0
+
+    temp_c = weather.get("temp_c")
+    precip_mm = weather.get("precip_mm")
+
+    adj = 0.0
+    if precip_mm is not None and precip_mm >= 1.0:
+        adj -= 0.01
+    if temp_c is not None and temp_c <= 8:
+        adj -= 0.01
+
+    return adj
+
+
+def calcular_probabilidad_local_pro(
+    away_team,
+    home_team,
+    standings,
+    away_pitcher="TBD",
+    home_pitcher="TBD",
+    away_pitcher_stats=None,
+    home_pitcher_stats=None,
+    weather=None
+):
     away = standings.get(away_team)
     home = standings.get(home_team)
 
@@ -396,8 +681,13 @@ def calcular_probabilidad_local_pro(away_team, home_team, standings, away_pitche
     diff_runs_scored = (home.get("runs_scored", 4.5) - away.get("runs_scored", 4.5)) / 10.0
     diff_runs_allowed = (away.get("runs_allowed", 4.5) - home.get("runs_allowed", 4.5)) / 10.0
 
-    p_home = pitcher_score_from_name(home_pitcher)
-    p_away = pitcher_score_from_name(away_pitcher)
+    if away_pitcher_stats is None:
+        away_pitcher_stats = {"era": 4.20, "whip": 1.30, "so9": 8.2, "ip": 0.0, "sample_ok": False}
+    if home_pitcher_stats is None:
+        home_pitcher_stats = {"era": 4.20, "whip": 1.30, "so9": 8.2, "ip": 0.0, "sample_ok": False}
+
+    p_home = score_pitcher_real(home_pitcher_stats)
+    p_away = score_pitcher_real(away_pitcher_stats)
     diff_pitcher = p_home - p_away
 
     score = 0.0
@@ -408,18 +698,40 @@ def calcular_probabilidad_local_pro(away_team, home_team, standings, away_pitche
     score += diff_streak * 0.9
     score += diff_runs_scored * 0.7
     score += diff_runs_allowed * 0.7
-    score += diff_pitcher * 1.35
+    score += diff_pitcher * 1.55
     score += 0.07
+
+    score += ajuste_clima_ml(weather)
+
+    if away_pitcher == "TBD":
+        score += 0.04
+    if home_pitcher == "TBD":
+        score -= 0.04
 
     prob_home = logistic(score)
     prob_home = clamp(prob_home, 0.28, 0.72)
-
     return prob_home
 
 
-def obtener_pick_juego_pro(away_team, home_team, standings, away_pitcher="TBD", home_pitcher="TBD"):
+def obtener_pick_juego_pro(
+    away_team,
+    home_team,
+    standings,
+    away_pitcher="TBD",
+    home_pitcher="TBD",
+    away_pitcher_stats=None,
+    home_pitcher_stats=None,
+    weather=None
+):
     prob_home = calcular_probabilidad_local_pro(
-        away_team, home_team, standings, away_pitcher, home_pitcher
+        away_team,
+        home_team,
+        standings,
+        away_pitcher,
+        home_pitcher,
+        away_pitcher_stats,
+        home_pitcher_stats,
+        weather
     )
 
     favorito = home_team if prob_home >= 0.5 else away_team
@@ -436,7 +748,16 @@ def obtener_pick_juego_pro(away_team, home_team, standings, away_pitcher="TBD", 
     }
 
 
-def estimar_total_juego_pro(away_team, home_team, standings, away_pitcher="TBD", home_pitcher="TBD"):
+def estimar_total_juego_pro(
+    away_team,
+    home_team,
+    standings,
+    away_pitcher="TBD",
+    home_pitcher="TBD",
+    away_pitcher_stats=None,
+    home_pitcher_stats=None,
+    weather=None
+):
     away = standings.get(away_team, {})
     home = standings.get(home_team, {})
 
@@ -451,11 +772,19 @@ def estimar_total_juego_pro(away_team, home_team, standings, away_pitcher="TBD",
     total += ((away_ra + home_ra) - 9.0) * 0.18
     total += ((away.get("run_diff", 0) + home.get("run_diff", 0)) / 162.0) * 0.20
 
-    p_away = pitcher_score_from_name(away_pitcher)
-    p_home = pitcher_score_from_name(home_pitcher)
+    if away_pitcher_stats is None:
+        away_pitcher_stats = {"era": 4.20, "whip": 1.30, "so9": 8.2, "ip": 0.0, "sample_ok": False}
+    if home_pitcher_stats is None:
+        home_pitcher_stats = {"era": 4.20, "whip": 1.30, "so9": 8.2, "ip": 0.0, "sample_ok": False}
 
-    total -= p_away * 1.10
-    total -= p_home * 1.10
+    total += (away_pitcher_stats.get("era", 4.20) - 4.00) * 0.30
+    total += (home_pitcher_stats.get("era", 4.20) - 4.00) * 0.30
+
+    total += (away_pitcher_stats.get("whip", 1.30) - 1.25) * 0.75
+    total += (home_pitcher_stats.get("whip", 1.30) - 1.25) * 0.75
+
+    total -= (away_pitcher_stats.get("so9", 8.2) - 8.5) * 0.08
+    total -= (home_pitcher_stats.get("so9", 8.2) - 8.5) * 0.08
 
     if away_pitcher == "TBD":
         total += 0.45
@@ -465,6 +794,8 @@ def estimar_total_juego_pro(away_team, home_team, standings, away_pitcher="TBD",
     last10_away = away.get("last10_win_pct", 0.5)
     last10_home = home.get("last10_win_pct", 0.5)
     total += ((last10_away + last10_home) - 1.0) * 0.30
+
+    total += ajuste_clima_total(weather)
 
     return round(clamp(total, 6.5, 12.5), 1)
 
@@ -820,9 +1151,7 @@ def hoy(message):
                 "hora_orden": hora_orden
             })
 
-        juegos_ordenados.sort(
-            key=lambda x: x["hora_orden"] if x["hora_orden"] else datetime.max
-        )
+        juegos_ordenados.sort(key=lambda x: x["hora_orden"] if x["hora_orden"] else datetime.max)
 
         texto = f"📅 <b>JUEGOS DE HOY</b>\n"
         texto += f"🗓️ {fecha} | Hora de Venezuela\n\n"
@@ -834,14 +1163,11 @@ def hoy(message):
             texto += f"⚾ Score: {j['score_away']} - {j['score_home']}\n\n"
 
         bot.delete_message(msg.chat.id, msg.message_id)
-        responder_largo(message.chat.id, texto)
+        responder_largo(message.chat.id, texto, parse_mode="HTML")
 
     except Exception as e:
-        bot.edit_message_text(
-            f"❌ Error al cargar juegos: {str(e)[:120]}",
-            msg.chat.id,
-            msg.message_id
-        )
+        bot.edit_message_text(f"❌ Error al cargar juegos: {str(e)[:120]}", msg.chat.id, msg.message_id)
+
 
 @bot.message_handler(commands=["pronosticos"])
 def pronosticos(message):
@@ -860,28 +1186,46 @@ def pronosticos(message):
         for g in games[:10]:
             away = g["teams"]["away"]["team"]["name"]
             home = g["teams"]["home"]["team"]["name"]
-            away_p = g["teams"]["away"].get("probablePitcher", {}).get("fullName", "TBD")
-            home_p = g["teams"]["home"].get("probablePitcher", {}).get("fullName", "TBD")
 
-            away_data = standings.get(away, {})
-            home_data = standings.get(home, {})
+            away_pitcher_obj = g["teams"]["away"].get("probablePitcher", {}) or {}
+            home_pitcher_obj = g["teams"]["home"].get("probablePitcher", {}) or {}
 
-            pred = obtener_pick_juego_pro(away, home, standings, away_p, home_p)
-            total_proj = estimar_total_juego_pro(away, home, standings, away_p, home_p)
+            away_p = away_pitcher_obj.get("fullName", "TBD")
+            home_p = home_pitcher_obj.get("fullName", "TBD")
+
+            away_pid = away_pitcher_obj.get("id")
+            home_pid = home_pitcher_obj.get("id")
+
+            away_pitcher_stats = obtener_stats_pitcher_reales(away_pid)
+            home_pitcher_stats = obtener_stats_pitcher_reales(home_pid)
+            weather = obtener_clima_partido(g)
+
+            pred = obtener_pick_juego_pro(
+                away, home, standings,
+                away_p, home_p,
+                away_pitcher_stats, home_pitcher_stats,
+                weather
+            )
+
+            total_proj = estimar_total_juego_pro(
+                away, home, standings,
+                away_p, home_p,
+                away_pitcher_stats, home_pitcher_stats,
+                weather
+            )
 
             texto += f"{away} @ {home}\n"
             texto += f"Pitchers: {away_p} vs {home_p}\n"
-            texto += f"Récord: {away_data.get('wins', 0)}-{away_data.get('losses', 0)} | {home_data.get('wins', 0)}-{home_data.get('losses', 0)}\n"
-            texto += f"L10: {away_data.get('last10_record', '-')} | {home_data.get('last10_record', '-')}\n"
-            texto += f"Run Diff: {away_data.get('run_diff', 0)} | {home_data.get('run_diff', 0)}\n"
+            texto += f"ERA reales: {away_pitcher_stats['era']} | {home_pitcher_stats['era']}\n"
+            texto += f"WHIP: {away_pitcher_stats['whip']} | {home_pitcher_stats['whip']}\n"
+            texto += f"Clima: {weather.get('temp_c')}°C | Viento {weather.get('wind_kmh')} km/h | Lluvia {weather.get('precip_mm')} mm\n"
             texto += f"Favorito del modelo: {pred['favorite']} ({pred['confidence_pct']}%)\n"
             texto += f"Total proyectado: {total_proj}\n"
-            texto += f"Confianza: {pred['confidence_label']}\n"
             if pred["avoid"]:
                 texto += "⚠️ Precaución: pitcher TBD detectado.\n"
             texto += "\n"
 
-        texto += "Nota: análisis basado en standings, splits home/away, run differential, últimos 10, racha y heurística de pitcher."
+        texto += "Nota: análisis basado en standings, splits home/away, run differential, últimos 10, ERA real, WHIP y clima."
 
         bot.delete_message(msg.chat.id, msg.message_id)
         responder_largo(message.chat.id, texto)
@@ -910,10 +1254,27 @@ def apuestas(message):
         for g in games:
             away = g["teams"]["away"]["team"]["name"]
             home = g["teams"]["home"]["team"]["name"]
-            away_p = g["teams"]["away"].get("probablePitcher", {}).get("fullName", "TBD")
-            home_p = g["teams"]["home"].get("probablePitcher", {}).get("fullName", "TBD")
 
-            pred = obtener_pick_juego_pro(away, home, standings, away_p, home_p)
+            away_pitcher_obj = g["teams"]["away"].get("probablePitcher", {}) or {}
+            home_pitcher_obj = g["teams"]["home"].get("probablePitcher", {}) or {}
+
+            away_p = away_pitcher_obj.get("fullName", "TBD")
+            home_p = home_pitcher_obj.get("fullName", "TBD")
+
+            away_pid = away_pitcher_obj.get("id")
+            home_pid = home_pitcher_obj.get("id")
+
+            away_pitcher_stats = obtener_stats_pitcher_reales(away_pid)
+            home_pitcher_stats = obtener_stats_pitcher_reales(home_pid)
+            weather = obtener_clima_partido(g)
+
+            pred = obtener_pick_juego_pro(
+                away, home, standings,
+                away_p, home_p,
+                away_pitcher_stats, home_pitcher_stats,
+                weather
+            )
+
             odds = obtener_odds_completas(away, home)
 
             if odds:
@@ -940,7 +1301,9 @@ def apuestas(message):
                             "edge": round((pred["prob_favorite"] - implied) * 100, 1),
                             "pitchers": f"{away_p} vs {home_p}",
                             "stake": stake,
-                            "cuota": cuota_ml
+                            "cuota": cuota_ml,
+                            "pitcher_eras": f"{away_pitcher_stats['era']} vs {home_pitcher_stats['era']}",
+                            "weather": weather
                         })
                         guardar_pick_csv(
                             hoy_str(),
@@ -955,7 +1318,13 @@ def apuestas(message):
                             grade
                         )
 
-                total_proj = estimar_total_juego_pro(away, home, standings, away_p, home_p)
+                total_proj = estimar_total_juego_pro(
+                    away, home, standings,
+                    away_p, home_p,
+                    away_pitcher_stats, home_pitcher_stats,
+                    weather
+                )
+
                 total_pick = elegir_total_pick(total_proj, odds.get("total_line"))
 
                 if total_pick:
@@ -970,7 +1339,9 @@ def apuestas(message):
                         "line": odds.get("total_line"),
                         "pitchers": f"{away_p} vs {home_p}",
                         "stake": stake_total,
-                        "cuota": cuota_total
+                        "cuota": cuota_total,
+                        "pitcher_eras": f"{away_pitcher_stats['era']} vs {home_pitcher_stats['era']}",
+                        "weather": weather
                     })
                     guardar_pick_csv(
                         hoy_str(),
@@ -995,7 +1366,9 @@ def apuestas(message):
                 texto += f"{p['pick']} | Grado {p['grade']} | Stake {p['stake']}\n"
                 texto += f"Modelo: {p['model_prob']}% | Implícita: {p['implied_prob']}%\n"
                 texto += f"Edge: +{p['edge']}% | Cuota: {p['cuota']}\n"
-                texto += f"Pitchers: {p['pitchers']}\n\n"
+                texto += f"Pitchers: {p['pitchers']}\n"
+                texto += f"ERA abridores: {p['pitcher_eras']}\n"
+                texto += f"Clima: {p['weather'].get('temp_c')}°C | Viento {p['weather'].get('wind_kmh')} km/h | Lluvia {p['weather'].get('precip_mm')} mm\n\n"
         else:
             texto += "No hay moneylines con edge claro hoy.\n\n"
 
@@ -1006,7 +1379,9 @@ def apuestas(message):
                 texto += f"{p['pick']} | Fuerza {p['strength']} | Stake {p['stake']}\n"
                 texto += f"Proj: {p['projection']} | Línea: {p['line']} | Cuota: {p['cuota']}\n"
                 texto += f"Ventaja modelo: {p['edge_total']}\n"
-                texto += f"Pitchers: {p['pitchers']}\n\n"
+                texto += f"Pitchers: {p['pitchers']}\n"
+                texto += f"ERA abridores: {p['pitcher_eras']}\n"
+                texto += f"Clima: {p['weather'].get('temp_c')}°C | Viento {p['weather'].get('wind_kmh')} km/h | Lluvia {p['weather'].get('precip_mm')} mm\n\n"
         else:
             texto += "No hay totales con edge claro hoy.\n\n"
 
@@ -1065,10 +1440,27 @@ def parley(message):
         for g in games:
             away = g["teams"]["away"]["team"]["name"]
             home = g["teams"]["home"]["team"]["name"]
-            away_p = g["teams"]["away"].get("probablePitcher", {}).get("fullName", "TBD")
-            home_p = g["teams"]["home"].get("probablePitcher", {}).get("fullName", "TBD")
 
-            pred = obtener_pick_juego_pro(away, home, standings, away_p, home_p)
+            away_pitcher_obj = g["teams"]["away"].get("probablePitcher", {}) or {}
+            home_pitcher_obj = g["teams"]["home"].get("probablePitcher", {}) or {}
+
+            away_p = away_pitcher_obj.get("fullName", "TBD")
+            home_p = home_pitcher_obj.get("fullName", "TBD")
+
+            away_pid = away_pitcher_obj.get("id")
+            home_pid = home_pitcher_obj.get("id")
+
+            away_pitcher_stats = obtener_stats_pitcher_reales(away_pid)
+            home_pitcher_stats = obtener_stats_pitcher_reales(home_pid)
+            weather = obtener_clima_partido(g)
+
+            pred = obtener_pick_juego_pro(
+                away, home, standings,
+                away_p, home_p,
+                away_pitcher_stats, home_pitcher_stats,
+                weather
+            )
+
             odds = obtener_odds_completas(away, home)
 
             if not odds or pred["avoid"]:
@@ -1097,7 +1489,9 @@ def parley(message):
                     "edge": round((pred["prob_favorite"] - implied) * 100, 1),
                     "confidence": pred["confidence_pct"],
                     "stake": stake,
-                    "cuota": cuota_ml
+                    "cuota": cuota_ml,
+                    "weather": weather,
+                    "eras": f"{away_pitcher_stats['era']} vs {home_pitcher_stats['era']}"
                 })
 
         candidatos.sort(key=lambda x: (x["grade"], x["edge"], x["confidence"]), reverse=True)
@@ -1114,6 +1508,7 @@ def parley(message):
         for i, p in enumerate(mejores, 1):
             texto += f"{i}. {p['game']} → {p['pick']}\n"
             texto += f"   Grade {p['grade']} | Edge +{p['edge']}% | Conf {p['confidence']}% | Cuota {p['cuota']}\n"
+            texto += f"   ERA: {p['eras']} | Temp: {p['weather'].get('temp_c')}°C | Viento: {p['weather'].get('wind_kmh')} km/h\n"
 
         nuevo_parlay = {
             "fecha": hoy_str(),
@@ -1167,12 +1562,34 @@ def parley_millonario(message):
         for g in games:
             away = g["teams"]["away"]["team"]["name"]
             home = g["teams"]["home"]["team"]["name"]
-            away_p = g["teams"]["away"].get("probablePitcher", {}).get("fullName", "TBD")
-            home_p = g["teams"]["home"].get("probablePitcher", {}).get("fullName", "TBD")
 
-            pred = obtener_pick_juego_pro(away, home, standings, away_p, home_p)
+            away_pitcher_obj = g["teams"]["away"].get("probablePitcher", {}) or {}
+            home_pitcher_obj = g["teams"]["home"].get("probablePitcher", {}) or {}
+
+            away_p = away_pitcher_obj.get("fullName", "TBD")
+            home_p = home_pitcher_obj.get("fullName", "TBD")
+
+            away_pid = away_pitcher_obj.get("id")
+            home_pid = home_pitcher_obj.get("id")
+
+            away_pitcher_stats = obtener_stats_pitcher_reales(away_pid)
+            home_pitcher_stats = obtener_stats_pitcher_reales(home_pid)
+            weather = obtener_clima_partido(g)
+
+            pred = obtener_pick_juego_pro(
+                away, home, standings,
+                away_p, home_p,
+                away_pitcher_stats, home_pitcher_stats,
+                weather
+            )
+
             odds = obtener_odds_completas(away, home)
-            total_proj = estimar_total_juego_pro(away, home, standings, away_p, home_p)
+            total_proj = estimar_total_juego_pro(
+                away, home, standings,
+                away_p, home_p,
+                away_pitcher_stats, home_pitcher_stats,
+                weather
+            )
 
             opciones = [f"{away} @ {home} → {pred['favorite']} ML"]
 
@@ -1242,11 +1659,22 @@ def pitchers(message):
         for g in games:
             away = g["teams"]["away"]["team"]["name"]
             home = g["teams"]["home"]["team"]["name"]
-            away_p = g["teams"]["away"].get("probablePitcher", {}).get("fullName", "TBD")
-            home_p = g["teams"]["home"].get("probablePitcher", {}).get("fullName", "TBD")
+
+            away_pitcher_obj = g["teams"]["away"].get("probablePitcher", {}) or {}
+            home_pitcher_obj = g["teams"]["home"].get("probablePitcher", {}) or {}
+
+            away_p = away_pitcher_obj.get("fullName", "TBD")
+            home_p = home_pitcher_obj.get("fullName", "TBD")
+
+            away_pid = away_pitcher_obj.get("id")
+            home_pid = home_pitcher_obj.get("id")
+
+            away_stats = obtener_stats_pitcher_reales(away_pid)
+            home_stats = obtener_stats_pitcher_reales(home_pid)
 
             texto += f"{away} @ {home}\n"
-            texto += f"   {away_p} vs {home_p}\n\n"
+            texto += f"   {away_p} vs {home_p}\n"
+            texto += f"   ERA: {away_stats['era']} vs {home_stats['era']} | WHIP: {away_stats['whip']} vs {home_stats['whip']}\n\n"
 
         bot.delete_message(msg.chat.id, msg.message_id)
         responder_largo(message.chat.id, texto)
@@ -1439,5 +1867,5 @@ def roi(message):
 # =========================================================
 # MAIN
 # =========================================================
-print("🔥 BOT MLB PRO CARGADO CORRECTAMENTE 🔥")
+print("🔥 BOT MLB PRO CON ERA REAL Y CLIMA CARGADO CORRECTAMENTE 🔥")
 bot.infinity_polling(skip_pending=True, timeout=30, long_polling_timeout=30)
