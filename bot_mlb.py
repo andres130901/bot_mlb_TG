@@ -1566,23 +1566,14 @@ def parley(message):
         bot.edit_message_text(f"❌ Error en /parley: {str(e)[:120]}", msg.chat.id, msg.message_id)
 
 
-@bot.message_handler(commands=["parley_millonario"])
+[3/4/2026 9:34 p. m.] Wilfredo Hermano: @bot.message_handler(commands=["parley_millonario"])
 def parley_millonario(message):
-    msg = bot.reply_to(message, "💰 Generando parley millonario...")
+    msg = bot.reply_to(message, "💰 Generando parley millonario PRO...")
     try:
         standings = obtener_standings()
         games = obtener_juegos_del_dia()
 
-        texto = f"💰 PARLEY MILLONARIO - {hoy_str()}\n\n"
-        texto += "⚠️ Alto riesgo / alta recompensa\n"
-        texto += "Solo toma una selección por juego para evitar contradicciones.\n\n"
-
-        if len(games) < 6:
-            texto += "No hay suficientes juegos hoy para un parley millonario razonable."
-            bot.edit_message_text(texto, msg.chat.id, msg.message_id)
-            return
-
-        legs = []
+        candidatos = []
 
         for g in games:
             away = g["teams"]["away"]["team"]["name"]
@@ -1597,49 +1588,103 @@ def parley_millonario(message):
             away_pid = away_pitcher_obj.get("id")
             home_pid = home_pitcher_obj.get("id")
 
-            away_pitcher_stats = obtener_stats_pitcher_reales(away_pid)
-            home_pitcher_stats = obtener_stats_pitcher_reales(home_pid)
+            away_stats = obtener_stats_pitcher_reales(away_pid)
+            home_stats = obtener_stats_pitcher_reales(home_pid)
             weather = obtener_clima_partido(g)
 
             pred = obtener_pick_juego_pro(
                 away, home, standings,
                 away_p, home_p,
-                away_pitcher_stats, home_pitcher_stats,
+                away_stats, home_stats,
                 weather
             )
 
             odds = obtener_odds_completas(away, home)
+
+            if not odds or pred["avoid"]:
+                continue
+
+            # ======================
+            # MONEYLINE
+            # ======================
+            cuota = None
+            implied = None
+
+            if pred["favorite"] == home and odds["home_moneyline"]:
+                cuota = odds["home_moneyline"]
+                implied = moneyline_to_prob(cuota)
+            elif pred["favorite"] == away and odds["away_moneyline"]:
+                cuota = odds["away_moneyline"]
+                implied = moneyline_to_prob(cuota)
+
+            if implied:
+                edge = pred["prob_favorite"] - implied
+                if edge > 0.03:
+                    candidatos.append({
+                        "tipo": "ML",
+                        "game": f"{away} @ {home}",
+                        "pick": f"{pred['favorite']} ML",
+                        "edge": round(edge * 100, 2),
+                        "conf": pred["confidence_pct"]
+                    })
+
+            # ======================
+            # TOTALS
+            # ======================
             total_proj = estimar_total_juego_pro(
                 away, home, standings,
                 away_p, home_p,
-                away_pitcher_stats, home_pitcher_stats,
+                away_stats, home_stats,
                 weather
             )
 
-            opciones = [f"{away} @ {home} → {pred['favorite']} ML"]
+            total_pick = elegir_total_pick(total_proj, odds.get("total_line"))
 
-            if odds and odds.get("total_line") is not None:
-                tp = elegir_total_pick(total_proj, odds["total_line"])
-                if tp:
-                    opciones.append(f"{away} @ {home} → {tp['pick']}")
+            if total_pick:
+                candidatos.append({
+                    "tipo": "TOTAL",
+                    "game": f"{away} @ {home}",
+                    "pick": total_pick["pick"],
+                    "edge": total_pick["edge"],
+                    "conf": 60 if total_pick["strength"] == "Alta" else 55
+                })
 
-            opciones.append(f"{away} @ {home} → NRFI")
-            legs.append(random.choice(opciones))
+        # ======================
+        # ORDENAR POR CALIDAD
+        # ======================
+        candidatos.sort(key=lambda x: (x["edge"], x["conf"]), reverse=True)
 
-        random.shuffle(legs)
-        seleccionadas = legs[:10] if len(legs) >= 10 else legs
+        # ======================
+        # EVITAR DUPLICADOS POR JUEGO
+        # ======================
+        seleccionados = []
+        juegos_usados = set()
 
-        for i, leg in enumerate(seleccionadas, 1):
-            texto += f"{i}. {leg}\n"
+        for c in candidatos:
+            if c["game"] in juegos_usados:
+                continue
+            seleccionados.append(c)
+            juegos_usados.add(c["game"])
+            if len(seleccionados) == 10:
+                break
 
-        texto += "\nJuega con responsabilidad."
+        texto = f"💰 PARLEY MILLONARIO PRO - {hoy_str()}\n\n"
 
-        bot.delete_message(msg.chat.id, msg.message_id)
-        responder_largo(message.chat.id, texto)
+        if len(seleccionados) < 6:
+            texto += "No hay suficientes picks de calidad hoy."
+            bot.edit_message_text(texto, msg.chat.id, msg.message_id)
+            return
+
+        for i, p in enumerate(seleccionados, 1):
+            texto += f"{i}. {p['game']} → {p['pick']}\n"
+            texto += f"   Edge: +{p['edge']} | Conf: {p['conf']}%\n"
+
+        texto += "\n🔥 Este parley ya NO es aleatorio."
+        texto += "\n📊 Seleccionado por edge real + modelo."
+[3/4/2026 9:34 p. m.] Wilfredo Hermano: bot.edit_message_text(texto, msg.chat.id, msg.message_id)
 
     except Exception as e:
         bot.edit_message_text(f"❌ Error en /parley_millonario: {str(e)[:120]}", msg.chat.id, msg.message_id)
-
 
 @bot.message_handler(commands=["lesionados"])
 def lesionados(message):
