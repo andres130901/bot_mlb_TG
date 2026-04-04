@@ -437,11 +437,12 @@ def obtener_venue_detalle(venue_id):
     url = f"{MLB_BASE}/venues"
     params = {"venueIds": str(venue_id)}
     data = safe_get(url, params=params)
-    venues = data.get("venues", [])
-if not venues or not isinstance(venues, list):
-    return {}
-return venues[0]
 
+    venues = data.get("venues", [])
+    if not venues or not isinstance(venues, list):
+        return {}
+
+    return venues[0]
 
 @lru_cache(maxsize=128)
 def geocodificar_lugar(nombre_lugar):
