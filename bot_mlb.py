@@ -912,6 +912,141 @@ def start(message):
         "Selecciona una opción:"
     )
     bot.send_message(message.chat.id, texto, parse_mode="HTML", reply_markup=menu_markup())
+@bot.message_handler(commands=["hoy"])
+def hoy(message):
+    msg = bot.reply_to(message, "📅 Cargando juegos del día...")
+    try:
+        games = obtener_juegos_del_dia()
+        fecha = hoy_str()
+        if not games:
+            bot.edit_message_text(f"📅 JUEGOS DE HOY ({fecha})\n\nNo hay juegos programados hoy.", msg.chat.id, msg.message_id)
+            return
+
+        juegos_ordenados = []
+        for g in games:
+            away = g["teams"]["away"]["team"]["name"]
+            home = g["teams"]["home"]["team"]["name"]
+            sa = g["teams"]["away"].get("score", "-")
+            sh = g["teams"]["home"].get("score", "-")
+            status = g.get("status", {}).get("detailedState", "Estado desconocido")
+            game_date = g.get("gameDate", "")
+
+            try:
+                dt_utc = datetime.fromisoformat(game_date.replace("Z", "+00:00"))
+                if ZoneInfo:
+                    dt_ve = dt_utc.astimezone(ZoneInfo("America/Caracas"))
+                else:
+                    dt_ve = dt_utc - timedelta(hours=4)
+                hora_orden = dt_ve
+                hora_txt = dt_ve.strftime("%I:%M %p")
+            except Exception:
+                hora_orden = None
+                hora_txt = "Hora no disponible"
+
+            juegos_ordenados.append({
+                "away": away, "home": home,
+                "score_away": sa, "score_home": sh,
+                "status": status, "hora_txt": hora_txt,
+                "hora_orden": hora_orden
+            })
+
+        juegos_ordenados.sort(key=lambda x: x["hora_orden"] if x["hora_orden"] else datetime.max)
+        texto = header("JUEGOS DE HOY", "📅")
+        texto += f"🗓️ {fecha} | Hora de Venezuela\n\n"
+
+        for i, j in enumerate(juegos_ordenados, 1):
+            texto += card_game(
+                f"{i}. {j['away']} @ {j['home']}",
+                [f"🕒 {j['hora_txt']} VET", f"📌 {j['status']}", f"⚾ Score: {j['score_away']} - {j['score_home']}"]
+            )
+
+        bot.delete_message(msg.chat.id, msg.message_id)
+        responder_largo(message.chat.id, texto, parse_mode="HTML")
+    except Exception as e:
+        bot.edit_message_text(f"❌ Error al cargar juegos: {str(e)[:120]}", msg.chat.id, msg.message_id)
+
+@bot.message_handler(commands=["posiciones"])
+def posiciones(message):
+    msg = bot.reply_to(message, "🏆 Cargando standings estilo ESPN...")
+    try:
+        season = temporada_actual()
+        url = f"{MLB_BASE}/standings"
+        params = {
+            "leagueId": "103,104",
+            "season": season,
+            "standingsTypes": "regularSeason"
+        }
+
+        data = safe_get(url, params=params)
+        records = data.get("records", [])
+
+        if not records:
+            bot.edit_message_text(
+                "❌ No pude cargar los standings.",
+                msg.chat.id,
+                msg.message_id
+            )
+            return
+
+        bloques = []
+        titulo = f"🏆 <b>STANDINGS MLB {season}</b>\n"
+
+        for record in records:
+            league_name = record.get("league", {}).get("name", "League")
+            division_name = record.get("division", {}).get("name", "División")
+
+            if "Spring" in division_name or "Wild Card" in division_name:
+                continue
+
+            lineas = []
+            lineas.append(f"{league_name} - {division_name}")
+            lineas.append("")
+            lineas.append("Team                 W   L   PCT   GB   HOME   AWAY   L10   STRK")
+            lineas.append("---------------------------------------------------------------")
+
+            for team in record.get("teamRecords", []):
+                nombre = team.get("team", {}).get("name", "")
+                wins = team.get("wins", 0)
+                losses = team.get("losses", 0)
+                pct = team.get("pct", "---")
+                gb = str(team.get("gamesBack", "-"))
+                home = f"{team.get('homeWins', 0)}-{team.get('homeLosses', 0)}"
+                away = f"{team.get('awayWins', 0)}-{team.get('awayLosses', 0)}"
+                l10 = f"{team.get('lastTenWins', 0)}-{team.get('lastTenLosses', 0)}"
+                strk = str(team.get("streakCode", "-"))
+
+                fila = (
+                    f"{nombre[:20].ljust(20)} "
+                    f"{str(wins).rjust(3)} "
+                    f"{str(losses).rjust(3)} "
+                    f"{str(pct).rjust(5)} "
+                    f"{gb.rjust(4)} "
+                    f"{home.rjust(6)} "
+                    f"{away.rjust(6)} "
+                    f"{l10.rjust(5)} "
+                    f"{strk.rjust(5)}"
+                )
+                lineas.append(fila)
+
+            bloque = "<pre>" + "\n".join(lineas) + "</pre>"
+            bloques.append(bloque)
+
+        bot.delete_message(msg.chat.id, msg.message_id)
+
+        # Enviar título
+        bot.send_message(message.chat.id, titulo, parse_mode="HTML")
+
+        # Enviar cada división en un mensaje aparte
+        for bloque in bloques:
+            bot.send_message(message.chat.id, bloque, parse_mode="HTML")
+
+    except Exception as e:
+        bot.edit_message_text(
+            f"❌ Error al cargar posiciones: {str(e)[:120]}",
+            msg.chat.id,
+            msg.message_id
+        )
+
 
 @bot.message_handler(commands=["apuestas"])
 def apuestas(message):
