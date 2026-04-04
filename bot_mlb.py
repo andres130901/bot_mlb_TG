@@ -1566,7 +1566,7 @@ def parley(message):
         bot.edit_message_text(f"❌ Error en /parley: {str(e)[:120]}", msg.chat.id, msg.message_id)
 
 
-[3/4/2026 9:34 p. m.] Wilfredo Hermano: @bot.message_handler(commands=["parley_millonario"])
+@bot.message_handler(commands=["parley_millonario"])
 def parley_millonario(message):
     msg = bot.reply_to(message, "💰 Generando parley millonario PRO...")
     try:
@@ -1681,7 +1681,7 @@ def parley_millonario(message):
 
         texto += "\n🔥 Este parley ya NO es aleatorio."
         texto += "\n📊 Seleccionado por edge real + modelo."
-[3/4/2026 9:34 p. m.] Wilfredo Hermano: bot.edit_message_text(texto, msg.chat.id, msg.message_id)
+            bot.edit_message_text(texto, msg.chat.id, msg.message_id)
 
     except Exception as e:
         bot.edit_message_text(f"❌ Error en /parley_millonario: {str(e)[:120]}", msg.chat.id, msg.message_id)
