@@ -341,7 +341,7 @@ def obtener_juegos_del_dia():
     if not isinstance(first_date, dict):
         return []
 
-    return first_date.get("games", []
+    return first_date.get("games", [])
 
 
 def obtener_transacciones_hoy():
