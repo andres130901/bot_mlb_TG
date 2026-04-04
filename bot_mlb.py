@@ -918,16 +918,23 @@ def hoy(message):
     try:
         games = obtener_juegos_del_dia()
         fecha = hoy_str()
+
         if not games:
-            bot.edit_message_text(f"📅 JUEGOS DE HOY ({fecha})\n\nNo hay juegos programados hoy.", msg.chat.id, msg.message_id)
+            bot.edit_message_text(
+                f"📅 JUEGOS DE HOY ({fecha})\n\nNo hay juegos programados hoy.",
+                msg.chat.id,
+                msg.message_id
+            )
             return
 
         juegos_ordenados = []
+
         for g in games:
-            away = g["teams"]["away"]["team"]["name"]
-            home = g["teams"]["home"]["team"]["name"]
-            sa = g["teams"]["away"].get("score", "-")
-            sh = g["teams"]["home"].get("score", "-")
+            teams = g.get("teams", {})
+            away = teams.get("away", {}).get("team", {}).get("name", "TBD")
+            home = teams.get("home", {}).get("team", {}).get("name", "TBD")
+            sa = teams.get("away", {}).get("score", "-")
+            sh = teams.get("home", {}).get("score", "-")
             status = g.get("status", {}).get("detailedState", "Estado desconocido")
             game_date = g.get("gameDate", "")
 
@@ -937,6 +944,7 @@ def hoy(message):
                     dt_ve = dt_utc.astimezone(ZoneInfo("America/Caracas"))
                 else:
                     dt_ve = dt_utc - timedelta(hours=4)
+
                 hora_orden = dt_ve
                 hora_txt = dt_ve.strftime("%I:%M %p")
             except Exception:
@@ -944,26 +952,41 @@ def hoy(message):
                 hora_txt = "Hora no disponible"
 
             juegos_ordenados.append({
-                "away": away, "home": home,
-                "score_away": sa, "score_home": sh,
-                "status": status, "hora_txt": hora_txt,
+                "away": away,
+                "home": home,
+                "score_away": sa,
+                "score_home": sh,
+                "status": status,
+                "hora_txt": hora_txt,
                 "hora_orden": hora_orden
             })
 
-        juegos_ordenados.sort(key=lambda x: x["hora_orden"] if x["hora_orden"] else datetime.max)
+        juegos_ordenados.sort(
+            key=lambda x: x["hora_orden"] if x["hora_orden"] else datetime.max
+        )
+
         texto = header("JUEGOS DE HOY", "📅")
         texto += f"🗓️ {fecha} | Hora de Venezuela\n\n"
 
         for i, j in enumerate(juegos_ordenados, 1):
             texto += card_game(
                 f"{i}. {j['away']} @ {j['home']}",
-                [f"🕒 {j['hora_txt']} VET", f"📌 {j['status']}", f"⚾ Score: {j['score_away']} - {j['score_home']}"]
+                [
+                    f"🕒 {j['hora_txt']} VET",
+                    f"📌 {j['status']}",
+                    f"⚾️ Score: {j['score_away']} - {j['score_home']}"
+                ]
             )
 
         bot.delete_message(msg.chat.id, msg.message_id)
         responder_largo(message.chat.id, texto, parse_mode="HTML")
+
     except Exception as e:
-        bot.edit_message_text(f"❌ Error al cargar juegos: {str(e)[:120]}", msg.chat.id, msg.message_id)
+        bot.edit_message_text(
+            f"❌ Error al cargar juegos: {str(e)[:120]}",
+            msg.chat.id,
+            msg.message_id
+        )
 
 @bot.message_handler(commands=["posiciones"])
 def posiciones(message):
@@ -998,11 +1021,12 @@ def posiciones(message):
             if "Spring" in division_name or "Wild Card" in division_name:
                 continue
 
-            lineas = []
-            lineas.append(f"{league_name} - {division_name}")
-            lineas.append("")
-            lineas.append("Team                 W   L   PCT   GB   HOME   AWAY   L10   STRK")
-            lineas.append("---------------------------------------------------------------")
+            lineas = [
+                f"{league_name} - {division_name}",
+                "",
+                "Team                 W   L   PCT   GB   HOME   AWAY   L10   STRK",
+                "---------------------------------------------------------------"
+            ]
 
             for team in record.get("teamRecords", []):
                 nombre = team.get("team", {}).get("name", "")
@@ -1028,15 +1052,11 @@ def posiciones(message):
                 )
                 lineas.append(fila)
 
-            bloque = "<pre>" + "\n".join(lineas) + "</pre>"
-            bloques.append(bloque)
+            bloques.append("<pre>" + "\n".join(lineas) + "</pre>")
 
         bot.delete_message(msg.chat.id, msg.message_id)
-
-        # Enviar título
         bot.send_message(message.chat.id, titulo, parse_mode="HTML")
 
-        # Enviar cada división en un mensaje aparte
         for bloque in bloques:
             bot.send_message(message.chat.id, bloque, parse_mode="HTML")
 
@@ -1046,7 +1066,6 @@ def posiciones(message):
             msg.chat.id,
             msg.message_id
         )
-
 
 @bot.message_handler(commands=["apuestas"])
 def apuestas(message):
@@ -1387,41 +1406,90 @@ def parley(message):
             msg.message_id
         )
 
+@bot.message_handler(commands=["posiciones"])
+def posiciones(message):
+    msg = bot.reply_to(message, "🏆 Cargando standings estilo ESPN...")
+    try:
+        season = temporada_actual()
+        url = f"{MLB_BASE}/standings"
+        params = {
+            "leagueId": "103,104",
+            "season": season,
+            "standingsTypes": "regularSeason"
+        }
 
+        data = safe_get(url, params=params)
+        records = data.get("records", [])
+
+        if not records:
+            bot.edit_message_text(
+                "❌ No pude cargar los standings.",
+                msg.chat.id,
+                msg.message_id
+            )
+            return
+
+        bloques = []
+        titulo = f"🏆 <b>STANDINGS MLB {season}</b>\n"
+
+        for record in records:
+            league_name = record.get("league", {}).get("name", "League")
+            division_name = record.get("division", {}).get("name", "División")
+
+            if "Spring" in division_name or "Wild Card" in division_name:
+                continue
+
+            lineas = [
+                f"{league_name} - {division_name}",
+                "",
+                "Team                 W   L   PCT   GB   HOME   AWAY   L10   STRK",
+                "---------------------------------------------------------------"
+            ]
+
+            for team in record.get("teamRecords", []):
+                nombre = team.get("team", {}).get("name", "")
+                wins = team.get("wins", 0)
+                losses = team.get("losses", 0)
+                pct = team.get("pct", "---")
+                gb = str(team.get("gamesBack", "-"))
+                home = f"{team.get('homeWins', 0)}-{team.get('homeLosses', 0)}"
+                away = f"{team.get('awayWins', 0)}-{team.get('awayLosses', 0)}"
+                l10 = f"{team.get('lastTenWins', 0)}-{team.get('lastTenLosses', 0)}"
+                strk = str(team.get("streakCode", "-"))
+
+                fila = (
+                    f"{nombre[:20].ljust(20)} "
+                    f"{str(wins).rjust(3)} "
+                    f"{str(losses).rjust(3)} "
+                    f"{str(pct).rjust(5)} "
+                    f"{gb.rjust(4)} "
+                    f"{home.rjust(6)} "
+                    f"{away.rjust(6)} "
+                    f"{l10.rjust(5)} "
+                    f"{strk.rjust(5)}"
+                )
+                lineas.append(fila)
+
+            bloques.append("<pre>" + "\n".join(lineas) + "</pre>")
+
+        bot.delete_message(msg.chat.id, msg.message_id)
+        bot.send_message(message.chat.id, titulo, parse_mode="HTML")
+
+        for bloque in bloques:
+            bot.send_message(message.chat.id, bloque, parse_mode="HTML")
+
+    except Exception as e:
+        bot.edit_message_text(
+            f"❌ Error al cargar posiciones: {str(e)[:120]}",
+            msg.chat.id,
+            msg.message_id
+        )
 @bot.message_handler(commands=["parley_millonario"])
 def parley_millonario(message):
     msg = bot.reply_to(message, "💰 Generando parley millonario PRO...")
     try:
         standings = obtener_standings()
         games = obtener_juegos_del_dia()
-        seleccionados = candidatos[:3]
-
-        for p in seleccionados:
-            texto += card_game(
-                p["game"],
-                [
-                    f"🎯 Pick: <b>{p['pick']}</b>",
-                    f"🧠 Confianza: <b>{p['confidence']}%</b>",
-                    f"🏷️ Grade: <b>{p['grade']}</b>",
-                    f"📈 Edge: <b>{p['edge']}%</b> | EV: <b>{p['ev_pct']}%</b>",
-                    f"💵 Cuota: <b>{p['cuota']}</b>",
-                    f"🎽 Pitchers: {p['pitchers']}",
-                    f"📉 ERA: {p['eras']}",
-                    f"🌡️ Temp: {p['weather'].get('temp_c')}°C | 💨 Viento: {p['weather'].get('wind_kmh')} km/h"
-                ]
-            )
-
-        bot.edit_message_text(texto, msg.chat.id, msg.message_id, parse_mode="HTML")
-
-    except Exception as e:
-        import traceback
-        print(traceback.format_exc())
-        bot.edit_message_text(
-            f"❌ Error en /parley: {str(e)[:120]}",
-            msg.chat.id,
-            msg.message_id
-        )
-
         candidatos = []
 
         for g in games:
@@ -1453,77 +1521,97 @@ def parley_millonario(message):
                 }
 
                 pred = obtener_pick_juego_pro(
-                    away, home, standings,
-                    away_p, home_p,
-                    away_stats, home_stats, weather
+                    away,
+                    home,
+                    standings,
+                    away_p,
+                    home_p,
+                    away_stats,
+                    home_stats,
+                    weather
                 )
 
                 total_proj = estimar_total_juego_pro(
-                    away, home, standings,
-                    away_p, home_p,
-                    away_stats, home_stats, weather
+                    away,
+                    home,
+                    standings,
+                    away_p,
+                    home_p,
+                    away_stats,
+                    home_stats,
+                    weather
                 )
 
                 odds = obtener_odds_completas(away, home)
 
-                cuota = "N/D"
-                edge = 0
+                cuota_ml = "N/D"
+                edge_ml = 0
+                implied_ml = None
 
-                if odds:
-                    implied = None
+                if odds and isinstance(odds, dict):
                     if pred["favorite"] == home and odds.get("home_moneyline") is not None:
-                        cuota = odds.get("home_moneyline")
-                        implied = moneyline_to_prob(cuota)
+                        cuota_ml = odds.get("home_moneyline")
+                        implied_ml = moneyline_to_prob(cuota_ml)
                     elif pred["favorite"] == away and odds.get("away_moneyline") is not None:
-                        cuota = odds.get("away_moneyline")
-                        implied = moneyline_to_prob(cuota)
+                        cuota_ml = odds.get("away_moneyline")
+                        implied_ml = moneyline_to_prob(cuota_ml)
 
-                    if implied is not None:
-                        edge = round((pred["prob_favorite"] - implied) * 100, 1)
+                    if implied_ml is not None:
+                        edge_ml = round((pred["prob_favorite"] - implied_ml) * 100, 1)
 
-                # pick ML
-                candidatos.append({
-                    "tipo": "ML",
-                    "game": f"{away} @ {home}",
-                    "pick": f"{pred['favorite']} ML",
-                    "edge": edge,
-                    "conf": pred["confidence_pct"],
-                    "cuota": cuota
-                })
+                if not pred["avoid"]:
+                    candidatos.append({
+                        "tipo": "ML",
+                        "game": f"{away} @ {home}",
+                        "pick": f"{pred['favorite']} ML",
+                        "edge": edge_ml,
+                        "conf": pred["confidence_pct"],
+                        "cuota": cuota_ml,
+                        "pitchers": f"{away_p} vs {home_p}",
+                        "eras": f"{away_stats['era']} vs {home_stats['era']}",
+                        "weather": weather
+                    })
 
-                # pick total proyectado simple
                 total_line = 8.5
-                if odds and odds.get("total_line") is not None:
-                    total_line = odds.get("total_line")
+                over_price = "N/D"
+                under_price = "N/D"
+
+                if odds and isinstance(odds, dict):
+                    if odds.get("total_line") is not None:
+                        total_line = odds.get("total_line")
+                    over_price = odds.get("over_price", "N/D")
+                    under_price = odds.get("under_price", "N/D")
 
                 total_pick = elegir_total_pick(total_proj, total_line)
+
                 if total_pick:
-                    candidatos.append({
+                    cuota_total = over_price if "Over" in total_pick["pick"] else under_price
+                candidatos.append({
                         "tipo": "TOTAL",
                         "game": f"{away} @ {home}",
                         "pick": total_pick["pick"],
                         "edge": total_pick["edge"],
                         "conf": pred["confidence_pct"],
-                        "cuota": odds.get("over_price") if odds and "Over" in total_pick["pick"] else (
-                            odds.get("under_price") if odds else "N/D"
-                        )
+                        "cuota": cuota_total,
+                        "pitchers": f"{away_p} vs {home_p}",
+                        "eras": f"{away_stats['era']} vs {home_stats['era']}",
+                        "weather": weather
                     })
 
             except Exception as game_error:
                 print(f"Error procesando juego en /parley_millonario: {game_error}")
                 continue
 
-        # ordenar por confianza y edge
         candidatos.sort(key=lambda x: (x["conf"], x["edge"]), reverse=True)
 
         texto = header("PARLEY MILLONARIO PRO", "💰")
         texto += f"📅 {hoy_str()}\n\n"
+
         if not candidatos:
             texto += "No se pudieron generar picks hoy."
             bot.edit_message_text(texto, msg.chat.id, msg.message_id, parse_mode="HTML")
             return
 
-        # tomar hasta 10 picks sin repetir demasiado
         seleccionados = []
         juegos_usados = set()
 
@@ -1532,13 +1620,19 @@ def parley_millonario(message):
                 break
 
             clave_juego = c["game"]
-
-            # permite máximo 1 pick por juego para que no quede raro
             if clave_juego in juegos_usados:
                 continue
 
             seleccionados.append(c)
             juegos_usados.add(clave_juego)
+
+        if len(seleccionados) < 10:
+            for c in candidatos:
+                if len(seleccionados) >= 10:
+                    break
+                if c in seleccionados:
+                    continue
+                seleccionados.append(c)
 
         for p in seleccionados:
             texto += card_game(
@@ -1547,7 +1641,10 @@ def parley_millonario(message):
                     f"🎯 Pick: <b>{p['pick']}</b>",
                     f"🧠 Confianza: <b>{p['conf']}%</b>",
                     f"📈 Edge: <b>{p['edge']}%</b>",
-                    f"💵 Cuota: <b>{p['cuota']}</b>"
+                    f"💵 Cuota: <b>{p['cuota']}</b>",
+                    f"🎽 Pitchers: {p['pitchers']}",
+                    f"📉 ERA: {p['eras']}",
+                    f"🌡️ Temp: {p['weather'].get('temp_c')}°C | 💨 Viento: {p['weather'].get('wind_kmh')} km/h"
                 ]
             )
 
@@ -1556,7 +1653,11 @@ def parley_millonario(message):
     except Exception as e:
         import traceback
         print(traceback.format_exc())
-        bot.edit_message_text(f"❌ Error en /parley_millonario: {str(e)[:120]}", msg.chat.id, msg.message_id)
+        bot.edit_message_text(
+            f"❌ Error en /parley_millonario: {str(e)[:120]}",
+            msg.chat.id,
+            msg.message_id
+        )
 
 @bot.message_handler(commands=["pitchers"])
 def pitchers(message):
