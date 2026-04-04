@@ -332,7 +332,16 @@ def obtener_juegos_del_dia():
         "hydrate": "probablePitcher,venue"
     }
     data = safe_get(url, params=params)
-    return data.get("dates", [{}])[0].get("games", [])
+
+    dates = data.get("dates", [])
+    if not dates or not isinstance(dates, list):
+        return []
+
+    first_date = dates[0] if len(dates) > 0 else {}
+    if not isinstance(first_date, dict):
+        return []
+
+    return first_date.get("games", []
 
 
 def obtener_transacciones_hoy():
@@ -346,6 +355,7 @@ def obtener_transacciones_hoy():
     return data.get("transactions", [])
 
 
+@lru_cache(maxsize=256)
 @lru_cache(maxsize=256)
 def obtener_stats_pitcher_reales(person_id, season=None):
     if not person_id:
@@ -369,7 +379,19 @@ def obtener_stats_pitcher_reales(person_id, season=None):
     }
 
     data = safe_get(url, params=params)
-    splits = data.get("stats", [{}])[0].get("splits", [])
+
+    stats_list = data.get("stats", [])
+    if not stats_list or not isinstance(stats_list, list):
+        return {
+            "era": 4.20,
+            "whip": 1.30,
+            "so9": 8.2,
+            "ip": 0.0,
+            "sample_ok": False
+        }
+
+    first_stats = stats_list[0] if len(stats_list) > 0 else {}
+    splits = first_stats.get("splits", []) if isinstance(first_stats, dict) else []
 
     if not splits:
         return {
@@ -380,7 +402,8 @@ def obtener_stats_pitcher_reales(person_id, season=None):
             "sample_ok": False
         }
 
-    stat = splits[0].get("stat", {})
+    stat = splits[0].get("stat", {}) if isinstance(splits[0], dict) else {}
+
     era = float(stat.get("era", 4.20) or 4.20)
     whip = float(stat.get("whip", 1.30) or 1.30)
 
@@ -406,7 +429,6 @@ def obtener_stats_pitcher_reales(person_id, season=None):
         "sample_ok": ip >= 10
     }
 
-
 @lru_cache(maxsize=128)
 def obtener_venue_detalle(venue_id):
     if not venue_id:
@@ -416,7 +438,9 @@ def obtener_venue_detalle(venue_id):
     params = {"venueIds": str(venue_id)}
     data = safe_get(url, params=params)
     venues = data.get("venues", [])
-    return venues[0] if venues else {}
+if not venues or not isinstance(venues, list):
+    return {}
+return venues[0]
 
 
 @lru_cache(maxsize=128)
