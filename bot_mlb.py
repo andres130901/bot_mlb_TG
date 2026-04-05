@@ -219,6 +219,35 @@ def abreviar_equipo(nombre):
     }
     return reemplazos.get(nombre, nombre)
 
+
+def normalizar_matchup(away_team, home_team):
+    away = (away_team or "").strip().lower()
+    home = (home_team or "").strip().lower()
+    return f"{away} @ {home}"
+
+def filtrar_matchups_unicos(items):
+    vistos = set()
+    filtrados = []
+
+    for item in items:
+        clave = item.get("matchup_key")
+
+        if not clave:
+            game = item.get("game", "")
+            if " @ " in game:
+                away, home = game.split(" @ ", 1)
+                clave = normalizar_matchup(away, home)
+            else:
+                clave = game.strip().lower()
+
+        if clave in vistos:
+            continue
+
+        vistos.add(clave)
+        filtrados.append(item)
+
+    return filtrados
+
 # =========================================================
 # MLB DATA
 # =========================================================
@@ -1131,6 +1160,7 @@ def apuestas(message):
                 if not pred["avoid"]:
                     picks_modelo.append({
                         "game": f"{away} @ {home}",
+                        "matchup_key": normalizar_matchup(away, home),
                         "pick": f"{pred['favorite']} ML",
                         "conf": pred["confidence_pct"],
                         "pitchers": f"{away_p} vs {home_p}",
@@ -1158,6 +1188,7 @@ def apuestas(message):
                         if grade != "D":
                             picks_ml.append({
                                 "game": f"{away} @ {home}",
+                                "matchup_key": normalizar_matchup(away, home),
                                 "pick": f"{pred['favorite']} ML",
                                 "grade": grade,
                                 "stake": stake,
@@ -1192,6 +1223,7 @@ def apuestas(message):
                             if grade_total != "D":
                                 picks_totals.append({
                                     "game": f"{away} @ {home}",
+                                    "matchup_key": normalizar_matchup(away, home),
                                     "pick": total_pick["pick"],
                                     "grade": grade_total,
                                     "stake": stake_total,
@@ -1215,6 +1247,10 @@ def apuestas(message):
         picks_ml.sort(key=lambda x: (x["ev_pct"], x["conf"]), reverse=True)
         picks_totals.sort(key=lambda x: (x["ev_pct"], x["edge_total"]), reverse=True)
         picks_modelo.sort(key=lambda x: x["conf"], reverse=True)
+
+        picks_ml = filtrar_matchups_unicos(picks_ml)
+        picks_totals = filtrar_matchups_unicos(picks_totals)
+        picks_modelo = filtrar_matchups_unicos(picks_modelo)
 
         texto += "💰 <b>MONEYLINE CON EV+</b>\n━━━━━━━━━━━━━━━━━━\n\n"
         if picks_ml:
@@ -1353,6 +1389,7 @@ def parley(message):
 
                 candidatos.append({
                     "game": f"{away} @ {home}",
+                    "matchup_key": normalizar_matchup(away, home),
                     "pick": f"{pred['favorite']} ML",
                     "grade": grade,
                     "edge": edge,
@@ -1369,6 +1406,7 @@ def parley(message):
                 continue
 
         candidatos.sort(key=lambda x: (x["ev_pct"], x["confidence"]), reverse=True)
+        candidatos = filtrar_matchups_unicos(candidatos)
 
         texto = header("PARLEY SERIO MLB", "🎯")
         texto += f"📅 {hoy_str()}\n\n"
@@ -1563,6 +1601,7 @@ def parley_millonario(message):
                     candidatos.append({
                         "tipo": "ML",
                         "game": f"{away} @ {home}",
+                        "matchup_key": normalizar_matchup(away, home),
                         "pick": f"{pred['favorite']} ML",
                         "edge": edge_ml,
                         "conf": pred["confidence_pct"],
@@ -1589,6 +1628,7 @@ def parley_millonario(message):
                 candidatos.append({
                         "tipo": "TOTAL",
                         "game": f"{away} @ {home}",
+                        "matchup_key": normalizar_matchup(away, home),
                         "pick": total_pick["pick"],
                         "edge": total_pick["edge"],
                         "conf": pred["confidence_pct"],
@@ -1603,6 +1643,7 @@ def parley_millonario(message):
                 continue
 
         candidatos.sort(key=lambda x: (x["conf"], x["edge"]), reverse=True)
+        candidatos = filtrar_matchups_unicos(candidatos)
 
         texto = header("PARLEY MILLONARIO PRO", "💰")
         texto += f"📅 {hoy_str()}\n\n"
@@ -1612,27 +1653,7 @@ def parley_millonario(message):
             bot.edit_message_text(texto, msg.chat.id, msg.message_id, parse_mode="HTML")
             return
 
-        seleccionados = []
-        juegos_usados = set()
-
-        for c in candidatos:
-            if len(seleccionados) >= 10:
-                break
-
-            clave_juego = c["game"]
-            if clave_juego in juegos_usados:
-                continue
-
-            seleccionados.append(c)
-            juegos_usados.add(clave_juego)
-
-        if len(seleccionados) < 10:
-            for c in candidatos:
-                if len(seleccionados) >= 10:
-                    break
-                if c in seleccionados:
-                    continue
-                seleccionados.append(c)
+        seleccionados = candidatos[:10]
 
         for p in seleccionados:
             texto += card_game(
