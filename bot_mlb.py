@@ -1811,8 +1811,28 @@ def pronosticos(message):
             return
 
         for p in picks[:8]:
-            texto += card_game
+            texto += card_game(
+                p["game"],
+                [
+                    f"🎯 Pick: <b>{p['pick']}</b>",
+                    f"🧠 Confianza: <b>{p['conf']}%</b>",
+                    f"🎽 Pitchers: {p['pitchers']}",
+                    f"📉 ERA: {p['eras']}",
+                    f"📊 Total proyectado: <b>{p['total_proj']}</b>",
+                    f"🌡️ Clima: {p['weather'].get('temp_c')}°C | 💨 {p['weather'].get('wind_kmh')} km/h"
+                ]
+            )
 
+        bot.edit_message_text(texto, msg.chat.id, msg.message_id, parse_mode="HTML")
+
+    except Exception as e:
+        import traceback
+        print(traceback.format_exc())
+        bot.edit_message_text(
+            f"❌ Error en /pronosticos: {str(e)[:120]}",
+            msg.chat.id,
+            msg.message_id
+        )
 
 @bot.message_handler(commands=["lesionados"])
 def lesionados(message):
