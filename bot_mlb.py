@@ -648,7 +648,7 @@ def obtener_pick_juego_pro(
         "favorite": favorito,
         "prob_home": prob_home,
         "prob_favorite": prob_fav,
-        "confidence_pct": round(prob_fav * 100, 1),
+        "confidence_pct": round(prob_fav * 100),
         "confidence_label": confidence_label(prob_fav),
         "avoid": avoid
     }
@@ -1746,93 +1746,37 @@ def pronosticos(message):
         picks = []
 
         for g in games:
-            try:
-                teams = g.get("teams", {})
-                away_data = teams.get("away", {})
-                home_data = teams.get("home", {})
+            teams = g.get("teams", {})
+            away = teams.get("away", {}).get("team", {}).get("name")
+            home = teams.get("home", {}).get("team", {}).get("name")
 
-                away = away_data.get("team", {}).get("name")
-                home = home_data.get("team", {}).get("name")
-
-                if not away or not home:
-                    continue
-
-                away_pitcher_obj = away_data.get("probablePitcher", {}) or {}
-                home_pitcher_obj = home_data.get("probablePitcher", {}) or {}
-
-                away_p = away_pitcher_obj.get("fullName", "TBD")
-                home_p = home_pitcher_obj.get("fullName", "TBD")
-
-                away_pid = away_pitcher_obj.get("id")
-                home_pid = home_pitcher_obj.get("id")
-
-                away_stats = obtener_stats_pitcher_reales(away_pid)
-                home_stats = obtener_stats_pitcher_reales(home_pid)
-
-                weather = obtener_clima_partido(g) or {
-                    "temp_c": None,
-                    "wind_kmh": None,
-                    "precip_mm": None
-                }
-
-                pred = obtener_pick_juego_pro(
-                    away, home, standings,
-                    away_p, home_p,
-                    away_stats, home_stats, weather
-                )
-
-                total_proj = estimar_total_juego_pro(
-                    away, home, standings,
-                    away_p, home_p,
-                    away_stats, home_stats, weather
-                )
-
-                picks.append({
-                    "game": f"{away} @ {home}",
-                    "matchup_key": normalizar_matchup(away, home),
-                    "pick": f"{pred['favorite']} ML",
-                    "conf": pred["confidence_pct"],
-                    "pitchers": f"{away_p} vs {home_p}",
-                    "eras": f"{away_stats['era']} vs {home_stats['era']}",
-                    "weather": weather,
-                    "total_proj": total_proj
-                })
-
-            except Exception as game_error:
-                print(f"Error procesando juego en /pronosticos: {game_error}")
+            if not away or not home:
                 continue
 
-        picks.sort(key=lambda x: x["conf"], reverse=True)
-        picks = filtrar_matchups_unicos(picks)
+            pred = obtener_pick_juego_pro(away, home, standings)
 
-        if not picks:
-            texto += "No se pudieron generar pronósticos hoy."
-            bot.edit_message_text(texto, msg.chat.id, msg.message_id, parse_mode="HTML")
-            return
+            picks.append({
+                "game": f"{away} @ {home}",
+                "pick": f"{pred['favorite']} ML",
+                "conf": pred["confidence_pct"]
+            })
+
+        picks.sort(key=lambda x: x["conf"], reverse=True)
 
         for p in picks[:8]:
             texto += card_game(
                 p["game"],
                 [
                     f"🎯 Pick: <b>{p['pick']}</b>",
-                    f"🧠 Confianza: <b>{p['conf']}%</b>",
-                    f"🎽 Pitchers: {p['pitchers']}",
-                    f"📉 ERA: {p['eras']}",
-                    f"📊 Total proyectado: <b>{p['total_proj']}</b>",
-                    f"🌡️ Clima: {p['weather'].get('temp_c')}°C | 💨 {p['weather'].get('wind_kmh')} km/h"
+                    f"🧠 Confianza: <b>{p['conf']}%</b>"
                 ]
             )
 
         bot.edit_message_text(texto, msg.chat.id, msg.message_id, parse_mode="HTML")
 
     except Exception as e:
-        import traceback
-        print(traceback.format_exc())
-        bot.edit_message_text(
-            f"❌ Error en /pronosticos: {str(e)[:120]}",
-            msg.chat.id,
-            msg.message_id
-        )
+        bot.edit_message_text(f"❌ Error: {str(e)[:120]}", msg.chat.id, msg.message_id)
+
 
 @bot.message_handler(commands=["lesionados"])
 def lesionados(message):
@@ -1933,3 +1877,114 @@ print(f"INICIANDO BOT {BOT_VERSION}")
 bot.infinity_polling(skip_pending=True, timeout=30, long_polling_timeout=30)
 
 
+
+# =========================
+# EXPORT JSON TIKTOK
+# =========================
+
+def obtener_carpeta_exportacion():
+    carpeta_base = "exports_tiktok"
+    carpeta_fecha = os.path.join(carpeta_base, hoy_str())
+    os.makedirs(carpeta_fecha, exist_ok=True)
+    return carpeta_fecha
+
+def guardar_json_tiktok(data):
+    carpeta = obtener_carpeta_exportacion()
+    ruta = os.path.join(carpeta, "mlb_contenido.json")
+    try:
+        with open(ruta, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        return ruta
+    except Exception as e:
+        print(f"Error guardando JSON TikTok: {e}")
+        return None
+
+def generar_dataset_tiktok():
+    standings = obtener_standings()
+    games = obtener_juegos_del_dia()
+
+    data = {
+        "fecha": hoy_str(),
+        "bot_version": BOT_VERSION,
+        "juegos_del_dia": [],
+        "pronosticos": [],
+        "apuestas": {
+            "moneyline_ev": [],
+            "totales_ev": [],
+            "modelo": []
+        },
+        "parley": [],
+        "parley_millonario": []
+    }
+
+    if not games:
+        return data
+
+    picks_modelo = []
+    candidatos_parley = []
+    candidatos_millonario = []
+
+    for g in games:
+        try:
+            teams = g.get("teams", {})
+            away = teams.get("away", {}).get("team", {}).get("name")
+            home = teams.get("home", {}).get("team", {}).get("name")
+            if not away or not home:
+                continue
+
+            matchup_key = normalizar_matchup(away, home)
+
+            pred = obtener_pick_juego_pro(away, home, standings)
+
+            picks_modelo.append({
+                "game": f"{away} @ {home}",
+                "matchup_key": matchup_key,
+                "pick": f"{pred['favorite']} ML",
+                "confianza": pred["confidence_pct"]
+            })
+
+            candidatos_parley.append({
+                "game": f"{away} @ {home}",
+                "matchup_key": matchup_key,
+                "pick": f"{pred['favorite']} ML",
+                "confianza": pred["confidence_pct"]
+            })
+
+            candidatos_millonario.append({
+                "game": f"{away} @ {home}",
+                "matchup_key": matchup_key,
+                "pick": f"{pred['favorite']} ML",
+                "confianza": pred["confidence_pct"]
+            })
+
+        except Exception as e:
+            print(e)
+
+    picks_modelo = filtrar_matchups_unicos(picks_modelo)
+    candidatos_parley = filtrar_matchups_unicos(candidatos_parley)
+    candidatos_millonario = filtrar_matchups_unicos(candidatos_millonario)
+
+    data["pronosticos"] = picks_modelo[:8]
+    data["parley"] = candidatos_parley[:3]
+    data["parley_millonario"] = candidatos_millonario[:10]
+
+    return data
+
+@bot.message_handler(commands=["exportar_json"])
+def exportar_json(message):
+    msg = bot.reply_to(message, "📦 Generando JSON...")
+    try:
+        data = generar_dataset_tiktok()
+        ruta = guardar_json_tiktok(data)
+
+        bot.edit_message_text(
+            f"✅ JSON generado\n{ruta}",
+            msg.chat.id,
+            msg.message_id
+        )
+    except Exception as e:
+        bot.edit_message_text(
+            f"❌ Error: {str(e)}",
+            msg.chat.id,
+            msg.message_id
+        )
