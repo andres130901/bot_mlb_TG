@@ -648,7 +648,7 @@ def obtener_pick_juego_pro(
         "favorite": favorito,
         "prob_home": prob_home,
         "prob_favorite": prob_fav,
-        "confidence_pct": round(prob_fav * 100),
+        "confidence_pct": round(prob_fav * 100, 1),
         "confidence_label": confidence_label(prob_fav),
         "avoid": avoid
     }
