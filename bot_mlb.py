@@ -1746,36 +1746,72 @@ def pronosticos(message):
         picks = []
 
         for g in games:
-            teams = g.get("teams", {})
-            away = teams.get("away", {}).get("team", {}).get("name")
-            home = teams.get("home", {}).get("team", {}).get("name")
+            try:
+                teams = g.get("teams", {})
+                away_data = teams.get("away", {})
+                home_data = teams.get("home", {})
 
-            if not away or not home:
+                away = away_data.get("team", {}).get("name")
+                home = home_data.get("team", {}).get("name")
+
+                if not away or not home:
+                    continue
+
+                away_pitcher_obj = away_data.get("probablePitcher", {}) or {}
+                home_pitcher_obj = home_data.get("probablePitcher", {}) or {}
+
+                away_p = away_pitcher_obj.get("fullName", "TBD")
+                home_p = home_pitcher_obj.get("fullName", "TBD")
+
+                away_pid = away_pitcher_obj.get("id")
+                home_pid = home_pitcher_obj.get("id")
+
+                away_stats = obtener_stats_pitcher_reales(away_pid)
+                home_stats = obtener_stats_pitcher_reales(home_pid)
+
+                weather = obtener_clima_partido(g) or {
+                    "temp_c": None,
+                    "wind_kmh": None,
+                    "precip_mm": None
+                }
+
+                pred = obtener_pick_juego_pro(
+                    away, home, standings,
+                    away_p, home_p,
+                    away_stats, home_stats, weather
+                )
+
+                total_proj = estimar_total_juego_pro(
+                    away, home, standings,
+                    away_p, home_p,
+                    away_stats, home_stats, weather
+                )
+
+                picks.append({
+                    "game": f"{away} @ {home}",
+                    "matchup_key": normalizar_matchup(away, home),
+                    "pick": f"{pred['favorite']} ML",
+                    "conf": pred["confidence_pct"],
+                    "pitchers": f"{away_p} vs {home_p}",
+                    "eras": f"{away_stats['era']} vs {home_stats['era']}",
+                    "weather": weather,
+                    "total_proj": total_proj
+                })
+
+            except Exception as game_error:
+                print(f"Error procesando juego en /pronosticos: {game_error}")
                 continue
 
-            pred = obtener_pick_juego_pro(away, home, standings)
-
-            picks.append({
-                "game": f"{away} @ {home}",
-                "pick": f"{pred['favorite']} ML",
-                "conf": pred["confidence_pct"]
-            })
-
         picks.sort(key=lambda x: x["conf"], reverse=True)
+        picks = filtrar_matchups_unicos(picks)
+
+        if not picks:
+            texto += "No se pudieron generar pronósticos hoy."
+            bot.edit_message_text(texto, msg.chat.id, msg.message_id, parse_mode="HTML")
+            return
 
         for p in picks[:8]:
-            texto += card_game(
-                p["game"],
-                [
-                    f"🎯 Pick: <b>{p['pick']}</b>",
-                    f"🧠 Confianza: <b>{p['conf']}%</b>"
-                ]
-            )
-
-        bot.edit_message_text(texto, msg.chat.id, msg.message_id, parse_mode="HTML")
-
-    except Exception as e:
-        bot.edit_message_text(f"❌ Error: {str(e)[:120]}", msg.chat.id, msg.message_id)
+            texto += card_game
 
 
 @bot.message_handler(commands=["lesionados"])
