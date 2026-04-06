@@ -1728,6 +1728,55 @@ def pitchers(message):
     except Exception as e:
         bot.edit_message_text(f"❌ Error al cargar pitchers: {str(e)[:120]}", msg.chat.id, msg.message_id)
 
+@bot.message_handler(commands=["pronosticos"])
+def pronosticos(message):
+    msg = bot.reply_to(message, "📊 Generando pronósticos del modelo...")
+    try:
+        standings = obtener_standings()
+        games = obtener_juegos_del_dia()
+
+        texto = header("PRONÓSTICOS DEL MODELO", "📊")
+        texto += f"📅 {hoy_str()}\n\n"
+
+        if not games:
+            texto += "No hay juegos hoy."
+            bot.edit_message_text(texto, msg.chat.id, msg.message_id)
+            return
+
+        picks = []
+
+        for g in games:
+            teams = g.get("teams", {})
+            away = teams.get("away", {}).get("team", {}).get("name")
+            home = teams.get("home", {}).get("team", {}).get("name")
+
+            if not away or not home:
+                continue
+
+            pred = obtener_pick_juego_pro(away, home, standings)
+
+            picks.append({
+                "game": f"{away} @ {home}",
+                "pick": f"{pred['favorite']} ML",
+                "conf": pred["confidence_pct"]
+            })
+
+        picks.sort(key=lambda x: x["conf"], reverse=True)
+
+        for p in picks[:8]:
+            texto += card_game(
+                p["game"],
+                [
+                    f"🎯 Pick: <b>{p['pick']}</b>",
+                    f"🧠 Confianza: <b>{p['conf']}%</b>"
+                ]
+            )
+
+        bot.edit_message_text(texto, msg.chat.id, msg.message_id, parse_mode="HTML")
+
+    except Exception as e:
+        bot.edit_message_text(f"❌ Error: {str(e)[:120]}", msg.chat.id, msg.message_id)
+
 
 @bot.message_handler(commands=["lesionados"])
 def lesionados(message):
