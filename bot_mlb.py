@@ -1982,29 +1982,173 @@ def posiciones(message):
 
 @bot.message_handler(commands=["parley_millonario"])
 def parley_millonario(message):
-    msg = bot.reply_to(message, "💎 Construyendo parley millonario V5...")
+    msg = bot.reply_to(message, "💎 Construyendo parley millonario mixto...")
     try:
         standings = obtener_standings()
         games = obtener_juegos_del_dia()
 
-        candidatos_ml = construir_candidatos_base(standings, games, incluir_totales=False)
-        seleccion_parley = seleccionar_parley_balanceado(candidatos_ml, legs=3)
-        excluidos = {s["matchup_key"] for s in seleccion_parley}
+        candidatos_ml = []
+        candidatos_totals = []
 
-        candidatos = construir_candidatos_base(standings, games, incluir_totales=True, excluir_matchups=excluidos)
-        seleccionados = seleccionar_parley_millonario(candidatos, legs=10, excluir_matchups=excluidos)
+        for g in games:
+            try:
+                teams = g.get("teams", {})
+                away_data = teams.get("away", {})
+                home_data = teams.get("home", {})
+
+                away = away_data.get("team", {}).get("name")
+                home = home_data.get("team", {}).get("name")
+                if not away or not home:
+                    continue
+
+                away_pitcher_obj = away_data.get("probablePitcher", {}) or {}
+                home_pitcher_obj = home_data.get("probablePitcher", {}) or {}
+
+                away_p = away_pitcher_obj.get("fullName", "TBD")
+                home_p = home_pitcher_obj.get("fullName", "TBD")
+
+                away_pid = away_pitcher_obj.get("id")
+                home_pid = home_pitcher_obj.get("id")
+
+                away_stats = obtener_stats_pitcher_reales(away_pid)
+                home_stats = obtener_stats_pitcher_reales(home_pid)
+
+                weather = obtener_clima_partido(g) or {
+                    "temp_c": None,
+                    "wind_kmh": None,
+                    "precip_mm": None
+                }
+
+                pred = obtener_pick_juego_pro(
+                    away, home, standings,
+                    away_p, home_p,
+                    away_stats, home_stats, weather
+                )
+
+                total_proj = estimar_total_juego_pro(
+                    away, home, standings,
+                    away_p, home_p,
+                    away_stats, home_stats, weather
+                )
+
+                odds = obtener_odds_completas(away, home)
+
+                # =========================
+                # ML
+                # =========================
+                cuota_ml = "N/D"
+                edge_ml = 0.0
+                ev_ml = 0.0
+
+                if odds and not pred["avoid"]:
+                    if pred["favorite"] == home and odds.get("home_moneyline") is not None:
+                        cuota_ml = odds.get("home_moneyline")
+                    elif pred["favorite"] == away and odds.get("away_moneyline") is not None:
+                        cuota_ml = odds.get("away_moneyline")
+
+                    if cuota_ml != "N/D":
+                        implied_ml = moneyline_to_prob(cuota_ml)
+                        if implied_ml is not None:
+                            edge_ml = round((pred["prob_favorite"] - implied_ml) * 100, 1)
+                        ev_calc = calcular_ev(pred["prob_favorite"], cuota_ml)
+                        if ev_calc is not None:
+                            ev_ml = round(ev_calc * 100, 2)
+
+                candidatos_ml.append({
+                    "tipo": "ML",
+                    "game": f"{away} @ {home}",
+                    "matchup_key": normalizar_matchup(away, home),
+                    "pick": f"{pred['favorite']} ML",
+                    "confidence": pred["confidence_pct"],
+                    "edge": edge_ml,
+                    "ev_pct": ev_ml,
+                    "cuota": cuota_ml,
+                    "pitchers": f"{away_p} vs {home_p}",
+                    "eras": f"{away_stats['era']} vs {home_stats['era']}",
+                    "weather": weather
+                })
+
+                # =========================
+                # TOTALS
+                # =========================
+                if odds and isinstance(odds, dict):
+                    total_line = odds.get("total_line")
+                    total_pick = elegir_total_pick(total_proj, total_line)
+
+                    if total_pick:
+                        if "Over" in total_pick["pick"]:
+                            cuota_total = odds.get("over_price")
+                        else:
+                            cuota_total = odds.get("under_price")
+                            candidatos_totals.append({
+                            "tipo": "TOTAL",
+                            "game": f"{away} @ {home}",
+                            "matchup_key": normalizar_matchup(away, home),
+                            "pick": total_pick["pick"],
+                            "confidence": pred["confidence_pct"],
+                            "edge": round(total_pick["edge"], 2),
+                            "ev_pct": 0.0,
+                            "cuota": cuota_total if cuota_total is not None else "N/D",
+                            "pitchers": f"{away_p} vs {home_p}",
+                            "eras": f"{away_stats['era']} vs {home_stats['era']}",
+                            "weather": weather
+                        })
+
+            except Exception as game_error:
+                print(f"Error procesando juego en /parley_millonario: {game_error}")
+                continue
+
+        candidatos_ml = filtrar_matchups_unicos(candidatos_ml)
+        candidatos_totals = filtrar_matchups_unicos(candidatos_totals)
+
+        candidatos_ml.sort(key=lambda x: (x["confidence"], x["edge"], x["ev_pct"]), reverse=True)
+        candidatos_totals.sort(key=lambda x: (x["edge"], x["confidence"]), reverse=True)
+
+        seleccionados = []
+        usados = set()
+
+        # 1) Meter hasta 4 totals primero
+        for c in candidatos_totals:
+            if len([x for x in seleccionados if x["tipo"] == "TOTAL"]) >= 4:
+                break
+            if c["matchup_key"] in usados:
+                continue
+            seleccionados.append(c)
+            usados.add(c["matchup_key"])
+
+        # 2) Meter hasta 6 ML
+        for c in candidatos_ml:
+            if len([x for x in seleccionados if x["tipo"] == "ML"]) >= 6:
+                break
+            if c["matchup_key"] in usados:
+                continue
+            seleccionados.append(c)
+            usados.add(c["matchup_key"])
+
+        # 3) Si no llegó a 10, completar con lo mejor que quede
+        resto = candidatos_totals + candidatos_ml
+        resto.sort(key=lambda x: (x["confidence"], x["edge"], x["ev_pct"]), reverse=True)
+
+        for c in resto:
+            if len(seleccionados) >= 10:
+                break
+            if c["matchup_key"] in usados:
+                continue
+            seleccionados.append(c)
+            usados.add(c["matchup_key"])
 
         texto = header("PARLEY MILLONARIO PRO", "💎")
         texto += f"📅 {hoy_str()}\n\n"
 
         if not seleccionados:
-            texto += "No hay juegos suficientes hoy."
+            texto += "No hay picks suficientes hoy."
         else:
-            for p in seleccionados:
+            for p in seleccionados[:10]:
                 texto += card_game(
                     p["game"],
                     [
                         f"🔥 Pick: <b>{p['pick']}</b>",
+                        f"📌 Tipo: <b>{p['tipo']}</b>",
                         f"🧠 Confianza: <b>{p['confidence']}%</b>",
                         f"📈 Edge: <b>{p['edge']}%</b> | EV: <b>{p['ev_pct']}%</b>",
                         f"💵 Cuota: <b>{p['cuota']}</b>",
