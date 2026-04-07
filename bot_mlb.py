@@ -163,12 +163,14 @@ def parse_streak(streak_code):
         pass
     return 0.0
 
+
 def confidence_label(prob):
-    if prob >= 0.62:
+    if prob >= 0.60:
         return "Alta"
-    if prob >= 0.56:
+    if prob >= 0.55:
         return "Media"
     return "Baja"
+
 
 def moneyline_to_prob(moneyline):
     try:
@@ -281,6 +283,55 @@ def safe_int(value, default=None):
         return int(value)
     except Exception:
         return default
+
+
+# =========================================================
+# FILTROS DE CALIDAD
+# =========================================================
+MIN_CONF_PRONOSTICO = 51.0
+MIN_CONF_PARLEY = 54.5
+MIN_EDGE_PARLEY = 2.0
+MIN_EV_PARLEY = 1.5
+MIN_CONF_MILLONARIO = 56.0
+MIN_EDGE_MILLONARIO = 3.0
+MIN_TOTAL_EDGE_MILLONARIO = 0.55
+
+def muestra_pitcher_debil(stats):
+    ip = stats.get("ip", 0.0)
+    return (not stats.get("sample_ok", False)) or ip < 8.0
+
+def condiciones_inciertas(away_pitcher, home_pitcher, away_stats, home_stats):
+    if away_pitcher == "TBD" or home_pitcher == "TBD":
+        return True
+    if muestra_pitcher_debil(away_stats) and muestra_pitcher_debil(home_stats):
+        return True
+    return False
+
+def es_pick_parley_valido(item):
+    if item.get("cuota") in [None, "N/D"]:
+        return False
+    if item.get("confidence", item.get("confianza", 0)) < MIN_CONF_PARLEY:
+        return False
+    if item.get("edge", 0) < MIN_EDGE_PARLEY:
+        return False
+    if item.get("ev_pct", 0) < MIN_EV_PARLEY:
+        return False
+    grade = str(item.get("grade", ""))
+    if grade in ["D", "", "Modelo"]:
+        return False
+    return True
+
+def es_pick_millonario_valido(item):
+    if item.get("cuota") in [None, "N/D"]:
+        return False
+    conf = item.get("conf", item.get("confianza", 0))
+    if item.get("tipo") == "TOTAL":
+        return conf >= MIN_CONF_MILLONARIO and item.get("edge", 0) >= MIN_TOTAL_EDGE_MILLONARIO
+    return conf >= MIN_CONF_MILLONARIO and item.get("edge", 0) >= MIN_EDGE_MILLONARIO
+
+def valor_clima(weather, campo):
+    val = weather.get(campo) if isinstance(weather, dict) else None
+    return "N/D" if val is None else val
 
 # =========================================================
 # MLB DATA
@@ -616,6 +667,7 @@ def ajuste_clima_ml(weather):
         adj -= 0.01
     return adj
 
+
 def calcular_probabilidad_local_pro(
     away_team, home_team, standings,
     away_pitcher="TBD", home_pitcher="TBD",
@@ -645,23 +697,33 @@ def calcular_probabilidad_local_pro(
     diff_pitcher = p_home - p_away
 
     score = 0.0
-    score += diff_win_pct * 2.8
-    score += diff_split * 1.9
-    score += diff_last10 * 1.2
-    score += diff_run_diff * 1.6
-    score += diff_streak * 1.0
-    score += diff_runs_scored * 0.9
-    score += diff_runs_allowed * 0.9
-    score += diff_pitcher * 1.8
-    score += 0.09
+    score += diff_win_pct * 3.2
+    score += diff_split * 2.3
+    score += diff_last10 * 1.4
+    score += diff_run_diff * 2.1
+    score += diff_streak * 1.1
+    score += diff_runs_scored * 1.2
+    score += diff_runs_allowed * 1.2
+    score += diff_pitcher * 2.6
+    score += 0.10
     score += ajuste_clima_ml(weather)
 
     if away_pitcher == "TBD":
-        score += 0.04
+        score += 0.06
     if home_pitcher == "TBD":
-        score -= 0.04
+        score -= 0.06
 
-    return clamp(logistic(score), 0.25, 0.75)
+    # Penaliza juegos con mucha incertidumbre de muestra
+    if condiciones_inciertas(away_pitcher, home_pitcher, away_pitcher_stats, home_pitcher_stats):
+        score *= 0.85
+
+    # Penaliza matchups excesivamente cerrados para no inflar picks débiles
+    if abs(diff_pitcher) < 0.05:
+        score *= 0.92
+
+    return clamp(logistic(score), 0.28, 0.72)
+
+
 
 def obtener_pick_juego_pro(
     away_team, home_team, standings,
@@ -676,16 +738,23 @@ def obtener_pick_juego_pro(
 
     favorito = home_team if prob_home >= 0.5 else away_team
     prob_fav = prob_home if favorito == home_team else (1 - prob_home)
-    avoid = away_pitcher == "TBD" or home_pitcher == "TBD"
+
+    avoid = condiciones_inciertas(
+        away_pitcher,
+        home_pitcher,
+        away_pitcher_stats or {"ip": 0.0, "sample_ok": False},
+        home_pitcher_stats or {"ip": 0.0, "sample_ok": False}
+    )
 
     return {
         "favorite": favorito,
         "prob_home": prob_home,
         "prob_favorite": prob_fav,
-        "confidence_pct": round(prob_fav * 100),
+        "confidence_pct": round(prob_fav * 100, 1),
         "confidence_label": confidence_label(prob_fav),
         "avoid": avoid
     }
+
 
 def estimar_total_juego_pro(
     away_team, home_team, standings,
@@ -930,6 +999,7 @@ def obtener_odds_completas(away_team, home_team):
 
 
 
+
 def generar_dataset_tiktok():
     standings = obtener_standings()
     games = obtener_juegos_del_dia()
@@ -965,6 +1035,7 @@ def generar_dataset_tiktok():
 
             away = away_data.get("team", {}).get("name")
             home = home_data.get("team", {}).get("name")
+
             if not away or not home:
                 continue
 
@@ -982,11 +1053,7 @@ def generar_dataset_tiktok():
             away_stats = obtener_stats_pitcher_reales(away_pid)
             home_stats = obtener_stats_pitcher_reales(home_pid)
 
-            weather = obtener_clima_partido(g) or {
-                "temp_c": None,
-                "wind_kmh": None,
-                "precip_mm": None
-            }
+            weather = obtener_clima_partido(g) or {"temp_c": None, "wind_kmh": None, "precip_mm": None}
 
             game_date = g.get("gameDate", "")
             hora_local = None
@@ -1009,10 +1076,7 @@ def generar_dataset_tiktok():
                 "home": home,
                 "hora_venezuela": hora_local,
                 "status": status,
-                "pitchers": {
-                    "away": away_p,
-                    "home": home_p
-                }
+                "pitchers": {"away": away_p, "home": home_p}
             })
 
             pred = obtener_pick_juego_pro(
@@ -1042,7 +1106,8 @@ def generar_dataset_tiktok():
                     "precip_mm": safe_float(weather.get("precip_mm"))
                 }
             }
-            picks_modelo.append(pronostico_item)
+            if pred["confidence_pct"] >= MIN_CONF_PRONOSTICO:
+                picks_modelo.append(pronostico_item)
 
             odds = obtener_odds_completas(away, home)
 
@@ -1140,14 +1205,14 @@ def generar_dataset_tiktok():
                     ev_parley = calcular_ev(pred["prob_favorite"], cuota_parley)
                     grade_parley = grade_por_ev(ev_parley)
 
-            candidatos_parley.append({
+            candidato_parley = {
                 "game": f"{away} @ {home}",
                 "matchup_key": matchup_key,
                 "pick": f"{pred['favorite']} ML",
                 "grade": grade_parley,
                 "edge": edge_parley,
                 "ev_pct": round(ev_parley * 100, 2) if ev_parley is not None else 0,
-                "confianza": pred["confidence_pct"],
+                "confidence": pred["confidence_pct"],
                 "cuota": safe_int(cuota_parley) if cuota_parley != "N/D" else "N/D",
                 "pitchers": f"{away_p} vs {home_p}",
                 "era": f"{away_stats['era']} vs {home_stats['era']}",
@@ -1156,7 +1221,9 @@ def generar_dataset_tiktok():
                     "wind_kmh": safe_float(weather.get("wind_kmh")),
                     "precip_mm": safe_float(weather.get("precip_mm"))
                 }
-            })
+            }
+            if es_pick_parley_valido(candidato_parley):
+                candidatos_parley.append(candidato_parley)
 
             cuota_ml_m = "N/D"
             edge_ml_m = 0
@@ -1174,13 +1241,13 @@ def generar_dataset_tiktok():
                     edge_ml_m = round((pred["prob_favorite"] - implied_ml_m) * 100, 1)
 
             if not pred["avoid"]:
-                candidatos_millonario.append({
+                ml_item = {
                     "tipo": "ML",
                     "game": f"{away} @ {home}",
                     "matchup_key": matchup_key,
                     "pick": f"{pred['favorite']} ML",
                     "edge": edge_ml_m,
-                    "confianza": pred["confidence_pct"],
+                    "conf": pred["confidence_pct"],
                     "cuota": safe_int(cuota_ml_m) if cuota_ml_m != "N/D" else "N/D",
                     "pitchers": f"{away_p} vs {home_p}",
                     "era": f"{away_stats['era']} vs {home_stats['era']}",
@@ -1189,7 +1256,9 @@ def generar_dataset_tiktok():
                         "wind_kmh": safe_float(weather.get("wind_kmh")),
                         "precip_mm": safe_float(weather.get("precip_mm"))
                     }
-                })
+                }
+                if es_pick_millonario_valido(ml_item):
+                    candidatos_millonario.append(ml_item)
 
             total_line_m = 8.5
             over_price = "N/D"
@@ -1205,13 +1274,13 @@ def generar_dataset_tiktok():
 
             if total_pick_m:
                 cuota_total_m = over_price if "Over" in total_pick_m["pick"] else under_price
-                candidatos_millonario.append({
+                total_item = {
                     "tipo": "TOTAL",
                     "game": f"{away} @ {home}",
                     "matchup_key": matchup_key,
                     "pick": total_pick_m["pick"],
                     "edge": total_pick_m["edge"],
-                    "confianza": pred["confidence_pct"],
+                    "conf": pred["confidence_pct"],
                     "cuota": safe_int(cuota_total_m) if cuota_total_m != "N/D" else "N/D",
                     "pitchers": f"{away_p} vs {home_p}",
                     "era": f"{away_stats['era']} vs {home_stats['era']}",
@@ -1220,7 +1289,9 @@ def generar_dataset_tiktok():
                         "wind_kmh": safe_float(weather.get("wind_kmh")),
                         "precip_mm": safe_float(weather.get("precip_mm"))
                     }
-                })
+                }
+                if es_pick_millonario_valido(total_item):
+                    candidatos_millonario.append(total_item)
 
         except Exception as game_error:
             print(f"Error procesando juego en dataset TikTok: {game_error}")
@@ -1229,8 +1300,8 @@ def generar_dataset_tiktok():
     picks_ml.sort(key=lambda x: (x["ev_pct"], x["confianza"]), reverse=True)
     picks_totals.sort(key=lambda x: (x["ev_pct"], x["edge"]), reverse=True)
     picks_modelo.sort(key=lambda x: x["confianza"], reverse=True)
-    candidatos_parley.sort(key=lambda x: (x["ev_pct"], x["confianza"]), reverse=True)
-    candidatos_millonario.sort(key=lambda x: (x["confianza"], x["edge"]), reverse=True)
+    candidatos_parley.sort(key=lambda x: (x["ev_pct"], x["confidence"]), reverse=True)
+    candidatos_millonario.sort(key=lambda x: (x["conf"], x["edge"]), reverse=True)
 
     picks_ml = filtrar_matchups_unicos(picks_ml)
     picks_totals = filtrar_matchups_unicos(picks_totals)
@@ -1243,15 +1314,11 @@ def generar_dataset_tiktok():
     data["apuestas"]["totales_ev"] = picks_totals[:5]
     data["apuestas"]["modelo"] = picks_modelo[:5]
     data["parley"] = candidatos_parley[:3]
-    data["parley_millonario"] = candidatos_millonario[:10]
+    data["parley_millonario"] = candidatos_millonario[:6]
 
     return data
 
 
-# =========================================================
-# CALLBACKS
-# =========================================================
-@bot.callback_query_handler(func=lambda call: call.data.startswith("cmd_"))
 def callback_menu(call):
     try:
         if call.data == "cmd_hoy":
@@ -1677,6 +1744,7 @@ def apuestas(message):
 
 # PARLEY FUNCTION FIX (PRO_FALLBACK_V3)
 
+
 @bot.message_handler(commands=["parley", "parley_del_dia"])
 def parley(message):
     msg = bot.reply_to(message, "🎯 Construyendo parley serio con EV...")
@@ -1707,25 +1775,15 @@ def parley(message):
 
                 away_stats = obtener_stats_pitcher_reales(away_pid)
                 home_stats = obtener_stats_pitcher_reales(home_pid)
-                weather = obtener_clima_partido(g) or {
-                    "temp_c": None,
-                    "wind_kmh": None,
-                    "precip_mm": None
-                }
+                weather = obtener_clima_partido(g) or {"temp_c": None, "wind_kmh": None, "precip_mm": None}
 
                 pred = obtener_pick_juego_pro(
-                    away,
-                    home,
-                    standings,
-                    away_p,
-                    home_p,
-                    away_stats,
-                    home_stats,
-                    weather
+                    away, home, standings,
+                    away_p, home_p,
+                    away_stats, home_stats, weather
                 )
 
                 odds = obtener_odds_completas(away, home)
-
                 cuota = "N/D"
                 ev = None
                 grade = "Modelo"
@@ -1743,7 +1801,7 @@ def parley(message):
                         ev = calcular_ev(pred["prob_favorite"], cuota)
                         grade = grade_por_ev(ev)
 
-                candidatos.append({
+                candidato = {
                     "game": f"{away} @ {home}",
                     "matchup_key": normalizar_matchup(away, home),
                     "pick": f"{pred['favorite']} ML",
@@ -1755,20 +1813,29 @@ def parley(message):
                     "weather": weather,
                     "eras": f"{away_stats['era']} vs {home_stats['era']}",
                     "pitchers": f"{away_p} vs {home_p}"
-                })
+                }
+
+                if es_pick_parley_valido(candidato):
+                    candidatos.append(candidato)
 
             except Exception as game_error:
                 print(f"Error procesando juego en /parley: {game_error}")
                 continue
 
-        candidatos.sort(key=lambda x: (x["ev_pct"], x["confidence"]), reverse=True)
+        candidatos.sort(key=lambda x: (x["ev_pct"], x["confidence"], x["edge"]), reverse=True)
         candidatos = filtrar_matchups_unicos(candidatos)
 
         texto = header("PARLEY SERIO MLB", "🎯")
         texto += f"📅 {hoy_str()}\n\n"
 
-        if not candidatos:
-            texto += "No se pudieron generar picks hoy."
+        if len(candidatos) < 3:
+            texto += (
+                "Hoy no hay suficientes picks de calidad para construir un parley serio.\n\n"
+                f"Filtros activos:\n"
+                f"• Confianza mínima: <b>{MIN_CONF_PARLEY}%</b>\n"
+                f"• Edge mínimo: <b>{MIN_EDGE_PARLEY}%</b>\n"
+                f"• EV mínimo: <b>{MIN_EV_PARLEY}%</b>"
+            )
             bot.edit_message_text(texto, msg.chat.id, msg.message_id, parse_mode="HTML")
             return
 
@@ -1785,7 +1852,7 @@ def parley(message):
                     f"💵 Cuota: <b>{p['cuota']}</b>",
                     f"🎽 Pitchers: {p['pitchers']}",
                     f"📉 ERA: {p['eras']}",
-                    f"🌡️ Temp: {p['weather'].get('temp_c')}°C | 💨 Viento: {p['weather'].get('wind_kmh')} km/h"
+                    f"🌡️ Temp: {valor_clima(p['weather'], 'temp_c')}°C | 💨 Viento: {valor_clima(p['weather'], 'wind_kmh')} km/h"
                 ]
             )
 
@@ -1799,6 +1866,7 @@ def parley(message):
             msg.chat.id,
             msg.message_id
         )
+
 
 @bot.message_handler(commands=["posiciones"])
 def posiciones(message):
@@ -1878,6 +1946,7 @@ def posiciones(message):
             msg.chat.id,
             msg.message_id
         )
+
 @bot.message_handler(commands=["parley_millonario"])
 def parley_millonario(message):
     msg = bot.reply_to(message, "💰 Generando parley millonario PRO...")
@@ -1908,32 +1977,18 @@ def parley_millonario(message):
 
                 away_stats = obtener_stats_pitcher_reales(away_pid)
                 home_stats = obtener_stats_pitcher_reales(home_pid)
-                weather = obtener_clima_partido(g) or {
-                    "temp_c": None,
-                    "wind_kmh": None,
-                    "precip_mm": None
-                }
+                weather = obtener_clima_partido(g) or {"temp_c": None, "wind_kmh": None, "precip_mm": None}
 
                 pred = obtener_pick_juego_pro(
-                    away,
-                    home,
-                    standings,
-                    away_p,
-                    home_p,
-                    away_stats,
-                    home_stats,
-                    weather
+                    away, home, standings,
+                    away_p, home_p,
+                    away_stats, home_stats, weather
                 )
 
                 total_proj = estimar_total_juego_pro(
-                    away,
-                    home,
-                    standings,
-                    away_p,
-                    home_p,
-                    away_stats,
-                    home_stats,
-                    weather
+                    away, home, standings,
+                    away_p, home_p,
+                    away_stats, home_stats, weather
                 )
 
                 odds = obtener_odds_completas(away, home)
@@ -1954,7 +2009,7 @@ def parley_millonario(message):
                         edge_ml = round((pred["prob_favorite"] - implied_ml) * 100, 1)
 
                 if not pred["avoid"]:
-                    candidatos.append({
+                    ml_item = {
                         "tipo": "ML",
                         "game": f"{away} @ {home}",
                         "matchup_key": normalizar_matchup(away, home),
@@ -1965,7 +2020,9 @@ def parley_millonario(message):
                         "pitchers": f"{away_p} vs {home_p}",
                         "eras": f"{away_stats['era']} vs {home_stats['era']}",
                         "weather": weather
-                    })
+                    }
+                    if es_pick_millonario_valido(ml_item):
+                        candidatos.append(ml_item)
 
                 total_line = 8.5
                 over_price = "N/D"
@@ -1981,7 +2038,7 @@ def parley_millonario(message):
 
                 if total_pick:
                     cuota_total = over_price if "Over" in total_pick["pick"] else under_price
-                candidatos.append({
+                    total_item = {
                         "tipo": "TOTAL",
                         "game": f"{away} @ {home}",
                         "matchup_key": normalizar_matchup(away, home),
@@ -1992,7 +2049,9 @@ def parley_millonario(message):
                         "pitchers": f"{away_p} vs {home_p}",
                         "eras": f"{away_stats['era']} vs {home_stats['era']}",
                         "weather": weather
-                    })
+                    }
+                    if es_pick_millonario_valido(total_item):
+                        candidatos.append(total_item)
 
             except Exception as game_error:
                 print(f"Error procesando juego en /parley_millonario: {game_error}")
@@ -2004,12 +2063,18 @@ def parley_millonario(message):
         texto = header("PARLEY MILLONARIO PRO", "💰")
         texto += f"📅 {hoy_str()}\n\n"
 
-        if not candidatos:
-            texto += "No se pudieron generar picks hoy."
+        if len(candidatos) < 4:
+            texto += (
+                "Hoy no hay suficientes picks agresivos con calidad real para parley millonario.\n\n"
+                f"Filtros activos:\n"
+                f"• Confianza mínima: <b>{MIN_CONF_MILLONARIO}%</b>\n"
+                f"• Edge ML mínimo: <b>{MIN_EDGE_MILLONARIO}%</b>\n"
+                f"• Edge total mínimo: <b>{MIN_TOTAL_EDGE_MILLONARIO}</b>"
+            )
             bot.edit_message_text(texto, msg.chat.id, msg.message_id, parse_mode="HTML")
             return
 
-        seleccionados = candidatos[:10]
+        seleccionados = candidatos[:6]
 
         for p in seleccionados:
             texto += card_game(
@@ -2021,7 +2086,7 @@ def parley_millonario(message):
                     f"💵 Cuota: <b>{p['cuota']}</b>",
                     f"🎽 Pitchers: {p['pitchers']}",
                     f"📉 ERA: {p['eras']}",
-                    f"🌡️ Temp: {p['weather'].get('temp_c')}°C | 💨 Viento: {p['weather'].get('wind_kmh')} km/h"
+                    f"🌡️ Temp: {valor_clima(p['weather'], 'temp_c')}°C | 💨 Viento: {valor_clima(p['weather'], 'wind_kmh')} km/h"
                 ]
             )
 
@@ -2035,6 +2100,7 @@ def parley_millonario(message):
             msg.chat.id,
             msg.message_id
         )
+
 
 @bot.message_handler(commands=["pitchers"])
 def pitchers(message):
@@ -2084,6 +2150,7 @@ def pitchers(message):
     except Exception as e:
         bot.edit_message_text(f"❌ Error al cargar pitchers: {str(e)[:120]}", msg.chat.id, msg.message_id)
 
+
 @bot.message_handler(commands=["pronosticos"])
 def pronosticos(message):
     msg = bot.reply_to(message, "📊 Generando pronósticos del modelo...")
@@ -2102,36 +2169,96 @@ def pronosticos(message):
         picks = []
 
         for g in games:
-            teams = g.get("teams", {})
-            away = teams.get("away", {}).get("team", {}).get("name")
-            home = teams.get("home", {}).get("team", {}).get("name")
+            try:
+                teams = g.get("teams", {})
+                away_data = teams.get("away", {})
+                home_data = teams.get("home", {})
 
-            if not away or not home:
+                away = away_data.get("team", {}).get("name")
+                home = home_data.get("team", {}).get("name")
+
+                if not away or not home:
+                    continue
+
+                away_pitcher_obj = away_data.get("probablePitcher", {}) or {}
+                home_pitcher_obj = home_data.get("probablePitcher", {}) or {}
+
+                away_p = away_pitcher_obj.get("fullName", "TBD")
+                home_p = home_pitcher_obj.get("fullName", "TBD")
+
+                away_pid = away_pitcher_obj.get("id")
+                home_pid = home_pitcher_obj.get("id")
+
+                away_stats = obtener_stats_pitcher_reales(away_pid)
+                home_stats = obtener_stats_pitcher_reales(home_pid)
+
+                weather = obtener_clima_partido(g) or {
+                    "temp_c": None,
+                    "wind_kmh": None,
+                    "precip_mm": None
+                }
+
+                pred = obtener_pick_juego_pro(
+                    away, home, standings,
+                    away_p, home_p,
+                    away_stats, home_stats, weather
+                )
+
+                total_proj = estimar_total_juego_pro(
+                    away, home, standings,
+                    away_p, home_p,
+                    away_stats, home_stats, weather
+                )
+
+                if pred["confidence_pct"] < MIN_CONF_PRONOSTICO:
+                    continue
+
+                picks.append({
+                    "game": f"{away} @ {home}",
+                    "matchup_key": normalizar_matchup(away, home),
+                    "pick": f"{pred['favorite']} ML",
+                    "conf": pred["confidence_pct"],
+                    "pitchers": f"{away_p} vs {home_p}",
+                    "eras": f"{away_stats['era']} vs {home_stats['era']}",
+                    "weather": weather,
+                    "total_proj": total_proj
+                })
+
+            except Exception as game_error:
+                print(f"Error procesando juego en /pronosticos: {game_error}")
                 continue
 
-            pred = obtener_pick_juego_pro(away, home, standings)
-
-            picks.append({
-                "game": f"{away} @ {home}",
-                "pick": f"{pred['favorite']} ML",
-                "conf": pred["confidence_pct"]
-            })
-
         picks.sort(key=lambda x: x["conf"], reverse=True)
+        picks = filtrar_matchups_unicos(picks)
+
+        if not picks:
+            texto += "Hoy no hay suficientes juegos con ventaja clara del modelo."
+            bot.edit_message_text(texto, msg.chat.id, msg.message_id, parse_mode="HTML")
+            return
 
         for p in picks[:8]:
             texto += card_game(
                 p["game"],
                 [
                     f"🎯 Pick: <b>{p['pick']}</b>",
-                    f"🧠 Confianza: <b>{p['conf']}%</b>"
+                    f"🧠 Confianza: <b>{p['conf']}%</b>",
+                    f"🎽 Pitchers: {p['pitchers']}",
+                    f"📉 ERA: {p['eras']}",
+                    f"📊 Total proyectado: <b>{p['total_proj']}</b>",
+                    f"🌡️ Clima: {valor_clima(p['weather'], 'temp_c')}°C | 💨 {valor_clima(p['weather'], 'wind_kmh')} km/h"
                 ]
             )
 
         bot.edit_message_text(texto, msg.chat.id, msg.message_id, parse_mode="HTML")
 
     except Exception as e:
-        bot.edit_message_text(f"❌ Error: {str(e)[:120]}", msg.chat.id, msg.message_id)
+        import traceback
+        print(traceback.format_exc())
+        bot.edit_message_text(
+            f"❌ Error en /pronosticos: {str(e)[:120]}",
+            msg.chat.id,
+            msg.message_id
+        )
 
 
 @bot.message_handler(commands=["exportar_json"])
