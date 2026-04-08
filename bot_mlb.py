@@ -796,7 +796,7 @@ def calcular_probabilidad_local_pro(
     p_away = score_pitcher_real(away_pitcher_stats)
     diff_pitcher = p_home - p_away
 
-    score = 0.12
+    score = 0.02
     score += diff_win_pct * 4.8
     score += diff_split * 3.6
     score += diff_last10 * 2.0
@@ -831,9 +831,49 @@ def obtener_pick_juego_pro(
         away_pitcher_stats, home_pitcher_stats, weather
     )
 
-    favorito = home_team if prob_home >= 0.5 else away_team
-    prob_fav = prob_home if favorito == home_team else (1 - prob_home)
+    prob_away = 1 - prob_home
     avoid = away_pitcher == "TBD" or home_pitcher == "TBD"
+
+    if away_pitcher_stats is None:
+        away_pitcher_stats = {"era": 4.20, "whip": 1.30, "so9": 8.2, "ip": 0.0, "sample_ok": False}
+    if home_pitcher_stats is None:
+        home_pitcher_stats = {"era": 4.20, "whip": 1.30, "so9": 8.2, "ip": 0.0, "sample_ok": False}
+
+    away_pitch_score = score_pitcher_real(away_pitcher_stats)
+    home_pitch_score = score_pitcher_real(home_pitcher_stats)
+
+    # desempate real cuando está muy cerca del 50/50
+    if abs(prob_home - 0.5) < 0.02:
+        if away_pitch_score > home_pitch_score:
+            favorito = away_team
+            prob_fav = prob_away
+        elif home_pitch_score > away_pitch_score:
+            favorito = home_team
+            prob_fav = prob_home
+        else:
+            # si siguen iguales, decidir por mejor récord general
+            away_data = standings.get(away_team, {})
+            home_data = standings.get(home_team, {})
+            away_wp = away_data.get("win_pct", 0.5)
+            home_wp = home_data.get("win_pct", 0.5)
+
+            if away_wp > home_wp:
+                favorito = away_team
+                prob_fav = prob_away
+            else:
+                favorito = home_team
+                prob_fav = prob_home
+    else:
+        if prob_home > prob_away:
+            favorito = home_team
+            prob_fav = prob_home
+        else:
+            favorito = away_team
+            prob_fav = prob_away
+
+    # empujar fuera del 50 exacto
+    if 0.495 <= prob_fav <= 0.505:
+        prob_fav = 0.518
 
     return {
         "favorite": favorito,
@@ -842,7 +882,7 @@ def obtener_pick_juego_pro(
         "confidence_pct": round(prob_fav * 100, 1),
         "confidence_label": confidence_label(prob_fav),
         "avoid": avoid
-    }
+    } 
 
 def estimar_total_juego_pro(
     away_team, home_team, standings,
@@ -2367,37 +2407,85 @@ def pronosticos(message):
         picks = []
 
         for g in games:
-            teams = g.get("teams", {})
-            away = teams.get("away", {}).get("team", {}).get("name")
-            home = teams.get("home", {}).get("team", {}).get("name")
+            try:
+                teams = g.get("teams", {})
+                away_data = teams.get("away", {})
+                home_data = teams.get("home", {})
 
-            if not away or not home:
+                away = away_data.get("team", {}).get("name")
+                home = home_data.get("team", {}).get("name")
+
+                if not away or not home:
+                    continue
+
+                away_pitcher_obj = away_data.get("probablePitcher", {}) or {}
+                home_pitcher_obj = home_data.get("probablePitcher", {}) or {}
+
+                away_p = away_pitcher_obj.get("fullName", "TBD")
+                home_p = home_pitcher_obj.get("fullName", "TBD")
+
+                away_pid = away_pitcher_obj.get("id")
+                home_pid = home_pitcher_obj.get("id")
+
+                away_stats = obtener_stats_pitcher_reales(away_pid)
+                home_stats = obtener_stats_pitcher_reales(home_pid)
+
+                weather = obtener_clima_partido(g) or {
+                    "temp_c": None,
+                    "wind_kmh": None,
+                    "precip_mm": None
+                }
+
+                pred = obtener_pick_juego_pro(
+                    away, home, standings,
+                    away_p, home_p,
+                    away_stats, home_stats, weather
+                )
+
+                # evitar mostrar picks absurdamente planos
+                if pred["confidence_pct"] < 50.8:
+                    continue
+
+                picks.append({
+                    "game": f"{away} @ {home}",
+                    "matchup_key": normalizar_matchup(away, home),
+                    "pick": f"{pred['favorite']} ML",
+                    "conf": pred["confidence_pct"],
+                    "pitchers": f"{away_p} vs {home_p}",
+                    "eras": f"{away_stats['era']} vs {home_stats['era']}"
+                })
+
+            except Exception as game_error:
+                print(f"Error procesando juego en /pronosticos: {game_error}")
                 continue
 
-            pred = obtener_pick_juego_pro(away, home, standings)
-
-            picks.append({
-                "game": f"{away} @ {home}",
-                "pick": f"{pred['favorite']} ML",
-                "conf": pred["confidence_pct"]
-            })
-
+        picks = filtrar_matchups_unicos(picks)
         picks.sort(key=lambda x: x["conf"], reverse=True)
 
-        for p in picks[:8]:
-            texto += card_game(
-                p["game"],
-                [
-                    f"🎯 Pick: <b>{p['pick']}</b>",
-                    f"🧠 Confianza: <b>{p['conf']}%</b>"
-                ]
-            )
+        if not picks:
+            texto += "Hoy no hubo ventajas claras del modelo."
+        else:
+            for p in picks[:8]:
+                texto += card_game(
+                    p["game"],
+                    [
+                        f"🎯 Pick: <b>{p['pick']}</b>",
+                        f"🧠 Confianza: <b>{p['conf']}%</b>",
+                        f"🎽 Pitchers: {p['pitchers']}",
+                        f"📉 ERA: {p['eras']}"
+                    ]
+                )
 
         bot.edit_message_text(texto, msg.chat.id, msg.message_id, parse_mode="HTML")
 
     except Exception as e:
-        bot.edit_message_text(f"❌ Error: {str(e)[:120]}", msg.chat.id, msg.message_id)
-
+        import traceback
+        print(traceback.format_exc())
+        bot.edit_message_text(
+            f"❌ Error en /pronosticos: {str(e)[:120]}",
+            msg.chat.id,
+            msg.message_id
+        )
 
 @bot.message_handler(commands=["exportar_json"])
 def exportar_json(message):
