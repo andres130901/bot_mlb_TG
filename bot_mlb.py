@@ -1944,11 +1944,12 @@ def posiciones(message):
         )
 @bot.message_handler(commands=["parley_millonario"])
 def parley_millonario(message):
-    msg = bot.reply_to(message, "💎 Construyendo parley millonario SOLO TOTALS x10...")
+    msg = bot.reply_to(message, "💎 Construyendo parley millonario SOLO TOTALS...")
     try:
         standings = obtener_standings()
         games = obtener_juegos_del_dia()
 
+        max_picks = min(10, len(games))
         candidatos_totals = []
 
         for g in games:
@@ -1999,7 +2000,6 @@ def parley_millonario(message):
                 total_pick = None
                 cuota_total = "N/D"
 
-                # 1) Intentar con línea real
                 if odds and isinstance(odds, dict) and odds.get("total_line") is not None:
                     total_line = odds.get("total_line")
                     total_pick = elegir_total_pick(total_proj, total_line)
@@ -2007,7 +2007,6 @@ def parley_millonario(message):
                     if total_pick:
                         cuota_total = odds.get("over_price") if "Over" in total_pick["pick"] else odds.get("under_price")
 
-                # 2) Fallback interno si no hay línea o no dio pick
                 if total_pick is None:
                     total_pick = elegir_total_pick_fallback(total_proj)
 
@@ -2034,22 +2033,20 @@ def parley_millonario(message):
                 continue
 
         candidatos_totals = filtrar_matchups_unicos(candidatos_totals)
-
-        # ordenar por edge + respaldo del modelo
         candidatos_totals.sort(
             key=lambda x: (x["score_total"], x["edge"], x["confidence"]),
             reverse=True
         )
 
-        seleccionados = candidatos_totals[:10]
+        seleccionados = candidatos_totals[:max_picks]
 
         texto = header("PARLEY MILLONARIO SOLO TOTALS", "💎")
         texto += f"📅 {hoy_str()}\n\n"
 
         if not seleccionados:
-            texto += "No hubo totals suficientes hoy."
+            texto += "No hubo totals analizables hoy."
         else:
-            texto += f"📌 Totals seleccionados: <b>{len(seleccionados)}</b>/10\n\n"
+            texto += f"📌 Totals seleccionados: <b>{len(seleccionados)}</b>/{max_picks}\n\n"
 
             for p in seleccionados:
                 texto += card_game(
@@ -2066,10 +2063,6 @@ def parley_millonario(message):
                     ]
                 )
 
-            # Si no llega a 10, avisar claramente
-            if len(seleccionados) < 10:
-                texto += f"\n⚠️ Hoy solo hubo <b>{len(seleccionados)}</b> totals analizables con el modelo."
-
         bot.edit_message_text(texto, msg.chat.id, msg.message_id, parse_mode="HTML")
 
     except Exception as e:
@@ -2080,7 +2073,6 @@ def parley_millonario(message):
             msg.chat.id,
             msg.message_id
         )
-
 @bot.message_handler(commands=["pitchers"])
 def pitchers(message):
     msg = bot.reply_to(message, "🧢 Cargando pitchers...")
