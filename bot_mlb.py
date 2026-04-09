@@ -17,7 +17,7 @@ except ImportError:
 # =========================================================
 # VERSION
 # =========================================================
-BOT_VERSION = "V5_2_PRO"
+BOT_VERSION = "V6_REAL_EDGE"
 
 # =========================================================
 # CONFIG
@@ -164,10 +164,12 @@ def parse_streak(streak_code):
     return 0.0
 
 def confidence_label(prob):
-    if prob >= 0.62:
+    if prob >= 0.64:
         return "Alta"
-    if prob >= 0.56:
+    if prob >= 0.57:
         return "Media"
+    if prob >= 0.52:
+        return "Leve"
     return "Baja"
 
 def moneyline_to_prob(moneyline):
@@ -542,34 +544,40 @@ def score_pitcher_real(stats):
     score = 0.0
 
     if era <= 2.80:
-        score += 0.32
+        score += 0.42
     elif era <= 3.40:
-        score += 0.22
+        score += 0.28
     elif era <= 4.00:
-        score += 0.10
-    elif era > 4.60:
-        score -= 0.14
+        score += 0.12
+    elif era > 5.00:
+        score -= 0.22
+    elif era > 4.50:
+        score -= 0.12
 
     if whip <= 1.05:
-        score += 0.20
+        score += 0.28
     elif whip <= 1.18:
-        score += 0.12
-    elif whip <= 1.30:
-        score += 0.04
-    elif whip > 1.40:
-        score -= 0.10
+        score += 0.18
+    elif whip <= 1.28:
+        score += 0.06
+    elif whip > 1.42:
+        score -= 0.14
+    elif whip > 1.34:
+        score -= 0.08
 
-    if so9 >= 10.5:
-        score += 0.12
-    elif so9 >= 9.0:
-        score += 0.08
-    elif so9 >= 8.0:
-        score += 0.03
+    if so9 >= 10.8:
+        score += 0.16
+    elif so9 >= 9.4:
+        score += 0.10
+    elif so9 >= 8.2:
+        score += 0.04
     elif so9 < 6.5:
-        score -= 0.05
+        score -= 0.08
 
     if not sample_ok or ip < 10:
-        score *= 0.75
+        score *= 0.72
+    elif ip >= 25:
+        score *= 1.08
 
     return round(score, 3)
 
@@ -735,6 +743,23 @@ def elegir_total_pick(total_proyectado, total_line):
     if total_line is None:
         return None
 
+    try:
+        total_line = float(total_line)
+    except Exception:
+        return None
+
+    diff = total_proyectado - total_line
+
+    if diff >= 0.30:
+        return {"pick": f"Over {total_line}", "edge": round(diff, 2), "strength": "Alta" if diff >= 0.55 else "Media"}
+    if diff <= -0.30:
+        return {"pick": f"Under {total_line}", "edge": round(abs(diff), 2), "strength": "Alta" if diff <= -0.55 else "Media"}
+    if diff >= 0.12:
+        return {"pick": f"Over {total_line}", "edge": round(diff, 2), "strength": "Suave"}
+    if diff <= -0.12:
+        return {"pick": f"Under {total_line}", "edge": round(abs(diff), 2), "strength": "Suave"}
+    return None
+
 
 def elegir_total_pick_fallback(total_proyectado):
     """
@@ -758,21 +783,6 @@ def elegir_total_pick_fallback(total_proyectado):
             "edge": round(abs(diff), 2),
             "strength": "Fallback"
         }
-
-
-    diff = total_proyectado - total_line
-
-    if diff >= 0.45:
-        return {"pick": f"Over {total_line}", "edge": round(diff, 2), "strength": "Alta"}
-    if diff >= 0.15:
-        return {"pick": f"Over {total_line}", "edge": round(diff, 2), "strength": "Media"}
-    if diff <= -0.45:
-        return {"pick": f"Under {total_line}", "edge": round(abs(diff), 2), "strength": "Alta"}
-    if diff <= -0.15:
-        return {"pick": f"Under {total_line}", "edge": round(abs(diff), 2), "strength": "Media"}
-
-    return None
-
 def clasificar_apuesta(prob_model, implied_prob, avoid=False):
     if avoid:
         return None
