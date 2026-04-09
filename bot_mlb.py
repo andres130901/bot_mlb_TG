@@ -735,6 +735,31 @@ def elegir_total_pick(total_proyectado, total_line):
     if total_line is None:
         return None
 
+
+def elegir_total_pick_fallback(total_proyectado):
+    """
+    Siempre intenta generar un total razonable aunque no haya línea real.
+    """
+    if total_proyectado is None:
+        return None
+
+    linea_base = 8.5
+    diff = total_proyectado - linea_base
+
+    if diff >= 0:
+        return {
+            "pick": f"Over {linea_base}",
+            "edge": round(abs(diff), 2),
+            "strength": "Fallback"
+        }
+    else:
+        return {
+            "pick": f"Under {linea_base}",
+            "edge": round(abs(diff), 2),
+            "strength": "Fallback"
+        }
+
+
     diff = total_proyectado - total_line
 
     if diff >= 0.45:
@@ -1739,14 +1764,12 @@ def parley(message):
                         if ev_calc is not None:
                             ev_pct = round(ev_calc * 100, 2)
 
-                # score inteligente del pick
                 score_final = (
                     (pred["confidence_pct"] * 0.50) +
                     (edge * 1.20) +
                     (ev_pct * 1.50)
                 )
 
-                # penalizaciones de riesgo
                 if pred["avoid"]:
                     score_final -= 4.0
                 if cuota == "N/D":
@@ -1779,7 +1802,6 @@ def parley(message):
 
         candidatos = filtrar_matchups_unicos(candidatos)
 
-        # tiers por calidad real
         tier1 = [
             c for c in candidatos
             if (not c["avoid"]) and c["confidence"] >= 52.5 and c["edge"] >= 1.0 and c["score_final"] >= 26
@@ -1811,7 +1833,6 @@ def parley(message):
             if len(seleccionados) >= 3:
                 break
 
-        # fallback obligatorio: si no cumple medidas, igual tomar los 3 mejores picks analizados
         if len(seleccionados) < 3:
             restantes = sorted(
                 candidatos,
@@ -1836,7 +1857,6 @@ def parley(message):
                 texto += "✅ Selección premium del modelo"
             else:
                 texto += "⚠️ No hubo 3 picks premium; se muestran los 3 mejores picks analizados por el bot."
-
             for p in seleccionados:
                 texto += card_game(
                     p["game"],
@@ -2011,7 +2031,7 @@ def parley_millonario(message):
                     total_pick = elegir_total_pick_fallback(total_proj)
 
                 if total_pick:
-                    score_total = (total_pick["edge"] * 2.0) + (pred["confidence_pct"] * 0.35)
+                    score_total = (abs(total_pick["edge"]) * 2.0) + (pred["confidence_pct"] * 0.35)
 
                     candidatos_totals.append({
                         "tipo": "TOTAL",
@@ -2019,7 +2039,7 @@ def parley_millonario(message):
                         "matchup_key": matchup_key,
                         "pick": total_pick["pick"],
                         "confidence": pred["confidence_pct"],
-                        "edge": round(total_pick["edge"], 2),
+                        "edge": round(abs(total_pick["edge"]), 2),
                         "score_total": round(score_total, 2),
                         "cuota": cuota_total,
                         "pitchers": f"{away_p} vs {home_p}",
@@ -2033,21 +2053,33 @@ def parley_millonario(message):
                 continue
 
         candidatos_totals = filtrar_matchups_unicos(candidatos_totals)
-        candidatos_totals.sort(
-            key=lambda x: (x["score_total"], x["edge"], x["confidence"]),
-            reverse=True
-        )
 
-        seleccionados = candidatos_totals[:max_picks]
+        premium = [c for c in candidatos_totals if c["edge"] >= 0.50]
+        medios = [c for c in candidatos_totals if 0.25 <= c["edge"] < 0.50]
+        suaves = [c for c in candidatos_totals if c["edge"] < 0.25]
+
+        premium.sort(key=lambda x: (x["edge"], x["score_total"]), reverse=True)
+        medios.sort(key=lambda x: (x["edge"], x["score_total"]), reverse=True)
+        suaves.sort(key=lambda x: (x["edge"], x["score_total"]), reverse=True)
+
+        seleccionados = []
+
+        for pool in (premium, medios, suaves):
+            for c in pool:
+                if len(seleccionados) >= max_picks:
+                    break
+                if any(s["matchup_key"] == c["matchup_key"] for s in seleccionados):
+                    continue
+                seleccionados.append(c)
+            if len(seleccionados) >= max_picks:
+                break
 
         texto = header("PARLEY MILLONARIO SOLO TOTALS", "💎")
-        texto += f"📅 {hoy_str()}\n\n"
-
+        texto += f"📅 {hoy_str()}"
         if not seleccionados:
-            texto += "No hubo totals analizables hoy."
+            texto += "No hubo juegos analizables hoy."
         else:
-            texto += f"📌 Totals seleccionados: <b>{len(seleccionados)}</b>/{max_picks}\n\n"
-
+            texto += f"📌 Totals seleccionados: <b>{len(seleccionados)}</b>/{max_picks}"
             for p in seleccionados:
                 texto += card_game(
                     p["game"],
@@ -2073,6 +2105,8 @@ def parley_millonario(message):
             msg.chat.id,
             msg.message_id
         )
+
+
 @bot.message_handler(commands=["pitchers"])
 def pitchers(message):
     msg = bot.reply_to(message, "🧢 Cargando pitchers...")
