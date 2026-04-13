@@ -17,7 +17,7 @@ except ImportError:
 # =========================================================
 # VERSION
 # =========================================================
-BOT_VERSION = "V6_REAL_EDGE"
+BOT_VERSION = "PRO_FALLBACK_V3"
 
 # =========================================================
 # CONFIG
@@ -35,6 +35,7 @@ bot = telebot.TeleBot(TOKEN, parse_mode=None)
 MLB_BASE = "https://statsapi.mlb.com/api/v1"
 HISTORIAL_FILE = "historial_parlays.json"
 RESULTADOS_CSV = "resultados_apuestas.csv"
+PARLEYS_DIARIOS_FILE = "parleys_diarios.json"
 REQUEST_TIMEOUT = 20
 
 # =========================================================
@@ -74,6 +75,58 @@ def inicializar_csv_resultados():
 
 historial_parlays = cargar_historial()
 inicializar_csv_resultados()
+
+def cargar_parleys_diarios():
+    if not os.path.exists(PARLEYS_DIARIOS_FILE):
+        return []
+    try:
+        with open(PARLEYS_DIARIOS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data if isinstance(data, list) else []
+    except Exception as e:
+        print(f"Error cargando parleys diarios: {e}")
+        return []
+
+def guardar_parleys_diarios(data):
+    try:
+        with open(PARLEYS_DIARIOS_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"Error guardando parleys diarios: {e}")
+
+def buscar_parley_del_dia(tipo, fecha=None):
+    if fecha is None:
+        fecha = hoy_str()
+    data = cargar_parleys_diarios()
+    for p in data:
+        if p.get("fecha") == fecha and p.get("tipo") == tipo:
+            return p
+    return None
+
+def registrar_parley_del_dia(tipo, legs, fecha=None):
+    if fecha is None:
+        fecha = hoy_str()
+    existente = buscar_parley_del_dia(tipo, fecha)
+    if existente:
+        return existente
+    data = cargar_parleys_diarios()
+    nuevo = {"fecha": fecha, "tipo": tipo, "estado": "pendiente", "legs": legs}
+    data.append(nuevo)
+    guardar_parleys_diarios(data)
+    return nuevo
+
+def actualizar_estado_parley(fecha, tipo, estado):
+    data = cargar_parleys_diarios()
+    actualizado = False
+    for p in data:
+        if p.get("fecha") == fecha and p.get("tipo") == tipo:
+            p["estado"] = estado
+            actualizado = True
+            break
+    if actualizado:
+        guardar_parleys_diarios(data)
+    return actualizado
+
 
 # =========================================================
 # ESTILO VISUAL
@@ -164,12 +217,10 @@ def parse_streak(streak_code):
     return 0.0
 
 def confidence_label(prob):
-    if prob >= 0.64:
+    if prob >= 0.62:
         return "Alta"
-    if prob >= 0.57:
+    if prob >= 0.56:
         return "Media"
-    if prob >= 0.52:
-        return "Leve"
     return "Baja"
 
 def moneyline_to_prob(moneyline):
@@ -544,40 +595,34 @@ def score_pitcher_real(stats):
     score = 0.0
 
     if era <= 2.80:
-        score += 0.42
+        score += 0.32
     elif era <= 3.40:
-        score += 0.28
+        score += 0.22
     elif era <= 4.00:
-        score += 0.12
-    elif era > 5.00:
-        score -= 0.22
-    elif era > 4.50:
-        score -= 0.12
+        score += 0.10
+    elif era > 4.60:
+        score -= 0.14
 
     if whip <= 1.05:
-        score += 0.28
+        score += 0.20
     elif whip <= 1.18:
-        score += 0.18
-    elif whip <= 1.28:
-        score += 0.06
-    elif whip > 1.42:
-        score -= 0.14
-    elif whip > 1.34:
-        score -= 0.08
-
-    if so9 >= 10.8:
-        score += 0.16
-    elif so9 >= 9.4:
-        score += 0.10
-    elif so9 >= 8.2:
+        score += 0.12
+    elif whip <= 1.30:
         score += 0.04
+    elif whip > 1.40:
+        score -= 0.10
+
+    if so9 >= 10.5:
+        score += 0.12
+    elif so9 >= 9.0:
+        score += 0.08
+    elif so9 >= 8.0:
+        score += 0.03
     elif so9 < 6.5:
-        score -= 0.08
+        score -= 0.05
 
     if not sample_ok or ip < 10:
-        score *= 0.72
-    elif ip >= 25:
-        score *= 1.08
+        score *= 0.75
 
     return round(score, 3)
 
@@ -690,7 +735,7 @@ def obtener_pick_juego_pro(
         "favorite": favorito,
         "prob_home": prob_home,
         "prob_favorite": prob_fav,
-        "confidence_pct": round(prob_fav * 100),
+        "confidence_pct": round(prob_fav * 100, 1),
         "confidence_label": confidence_label(prob_fav),
         "avoid": avoid
     }
@@ -743,46 +788,19 @@ def elegir_total_pick(total_proyectado, total_line):
     if total_line is None:
         return None
 
-    try:
-        total_line = float(total_line)
-    except Exception:
-        return None
-
     diff = total_proyectado - total_line
 
-    if diff >= 0.30:
-        return {"pick": f"Over {total_line}", "edge": round(diff, 2), "strength": "Alta" if diff >= 0.55 else "Media"}
-    if diff <= -0.30:
-        return {"pick": f"Under {total_line}", "edge": round(abs(diff), 2), "strength": "Alta" if diff <= -0.55 else "Media"}
-    if diff >= 0.12:
-        return {"pick": f"Over {total_line}", "edge": round(diff, 2), "strength": "Suave"}
-    if diff <= -0.12:
-        return {"pick": f"Under {total_line}", "edge": round(abs(diff), 2), "strength": "Suave"}
+    if diff >= 0.45:
+        return {"pick": f"Over {total_line}", "edge": round(diff, 2), "strength": "Alta"}
+    if diff >= 0.15:
+        return {"pick": f"Over {total_line}", "edge": round(diff, 2), "strength": "Media"}
+    if diff <= -0.45:
+        return {"pick": f"Under {total_line}", "edge": round(abs(diff), 2), "strength": "Alta"}
+    if diff <= -0.15:
+        return {"pick": f"Under {total_line}", "edge": round(abs(diff), 2), "strength": "Media"}
+
     return None
 
-
-def elegir_total_pick_fallback(total_proyectado):
-    """
-    Siempre intenta generar un total razonable aunque no haya línea real.
-    """
-    if total_proyectado is None:
-        return None
-
-    linea_base = 8.5
-    diff = total_proyectado - linea_base
-
-    if diff >= 0:
-        return {
-            "pick": f"Over {linea_base}",
-            "edge": round(abs(diff), 2),
-            "strength": "Fallback"
-        }
-    else:
-        return {
-            "pick": f"Under {linea_base}",
-            "edge": round(abs(diff), 2),
-            "strength": "Fallback"
-        }
 def clasificar_apuesta(prob_model, implied_prob, avoid=False):
     if avoid:
         return None
@@ -1289,6 +1307,11 @@ def generar_dataset_tiktok():
 @bot.callback_query_handler(func=lambda call: call.data.startswith("cmd_"))
 def callback_menu(call):
     try:
+        try:
+            bot.answer_callback_query(call.id)
+        except Exception:
+            pass
+
         if call.data == "cmd_hoy":
             hoy(call.message)
         elif call.data == "cmd_posiciones":
@@ -1310,9 +1333,11 @@ def callback_menu(call):
         elif call.data == "cmd_exportar_json":
             exportar_json(call.message)
 
-        bot.answer_callback_query(call.id)
     except Exception as e:
-        bot.answer_callback_query(call.id, f"Error: {str(e)[:80]}")
+        try:
+            bot.send_message(call.message.chat.id, f"❌ Error en botón: {str(e)[:120]}")
+        except Exception:
+            pass
 
 # =========================================================
 # COMANDOS
@@ -1714,8 +1739,23 @@ def apuestas(message):
 
 @bot.message_handler(commands=["parley", "parley_del_dia"])
 def parley(message):
-    msg = bot.reply_to(message, "🎯 Construyendo parley V5.2 PRO...")
+    msg = bot.reply_to(message, "🎯 Construyendo parley del día...")
     try:
+        parley_existente = buscar_parley_del_dia("parley")
+        if parley_existente:
+            texto = header("PARLEY DEL DÍA (FIJO)", "🎯")
+            texto += f"📅 {parley_existente['fecha']}\n\n"
+            for leg in parley_existente.get("legs", []):
+                texto += card_game(
+                    leg["game"],
+                    [
+                        f"🎯 Pick: <b>{leg['pick']}</b>",
+                        f"🧠 Confianza: <b>{leg.get('confidence', 'N/D')}%</b>"
+                    ]
+                )
+            bot.edit_message_text(texto, msg.chat.id, msg.message_id, parse_mode="HTML")
+            return
+
         standings = obtener_standings()
         games = obtener_juegos_del_dia()
         candidatos = []
@@ -1742,11 +1782,7 @@ def parley(message):
 
                 away_stats = obtener_stats_pitcher_reales(away_pid)
                 home_stats = obtener_stats_pitcher_reales(home_pid)
-                weather = obtener_clima_partido(g) or {
-                    "temp_c": None,
-                    "wind_kmh": None,
-                    "precip_mm": None
-                }
+                weather = obtener_clima_partido(g) or {"temp_c": None, "wind_kmh": None, "precip_mm": None}
 
                 pred = obtener_pick_juego_pro(
                     away, home, standings,
@@ -1754,13 +1790,15 @@ def parley(message):
                     away_stats, home_stats, weather
                 )
 
-                odds = obtener_odds_completas(away, home)
+                if pred["avoid"]:
+                    continue
 
+                odds = obtener_odds_completas(away, home)
                 cuota = "N/D"
                 edge = 0.0
                 ev_pct = 0.0
 
-                if odds and not pred["avoid"]:
+                if odds and isinstance(odds, dict):
                     if pred["favorite"] == home and odds.get("home_moneyline") is not None:
                         cuota = odds.get("home_moneyline")
                     elif pred["favorite"] == away and odds.get("away_moneyline") is not None:
@@ -1774,22 +1812,7 @@ def parley(message):
                         if ev_calc is not None:
                             ev_pct = round(ev_calc * 100, 2)
 
-                score_final = (
-                    (pred["confidence_pct"] * 0.50) +
-                    (edge * 1.20) +
-                    (ev_pct * 1.50)
-                )
-
-                if pred["avoid"]:
-                    score_final -= 4.0
-                if cuota == "N/D":
-                    score_final -= 1.5
-                if edge < -1.0:
-                    score_final -= 4.0
-                elif edge < 0:
-                    score_final -= 1.5
-                if pred["confidence_pct"] < 51.0:
-                    score_final -= 2.5
+                score_final = (pred["confidence_pct"] * 0.70) + (edge * 1.00) + (ev_pct * 1.20)
 
                 candidatos.append({
                     "game": f"{away} @ {home}",
@@ -1799,74 +1822,22 @@ def parley(message):
                     "edge": edge,
                     "ev_pct": ev_pct,
                     "score_final": round(score_final, 2),
-                    "cuota": cuota,
-                    "pitchers": f"{away_p} vs {home_p}",
-                    "eras": f"{away_stats['era']} vs {home_stats['era']}",
-                    "weather": weather,
-                    "avoid": pred["avoid"]
+                    "cuota": cuota
                 })
-
             except Exception as game_error:
                 print(f"Error procesando juego en /parley: {game_error}")
                 continue
 
         candidatos = filtrar_matchups_unicos(candidatos)
-
-        tier1 = [
-            c for c in candidatos
-            if (not c["avoid"]) and c["confidence"] >= 52.5 and c["edge"] >= 1.0 and c["score_final"] >= 26
-        ]
-        tier2 = [
-            c for c in candidatos
-            if (not c["avoid"]) and c["confidence"] >= 51.5 and c["score_final"] >= 24
-        ]
-        tier3 = [
-            c for c in candidatos
-            if c["confidence"] >= 50.0
-        ]
-
-        tier1.sort(key=lambda x: (x["score_final"], x["confidence"], x["edge"], x["ev_pct"]), reverse=True)
-        tier2.sort(key=lambda x: (x["score_final"], x["confidence"], x["edge"], x["ev_pct"]), reverse=True)
-        tier3.sort(key=lambda x: (x["score_final"], x["confidence"], x["edge"], x["ev_pct"]), reverse=True)
-
-        seleccionados = []
-
-        for pool in (tier1, tier2, tier3):
-            for c in pool:
-                if len(seleccionados) >= 3:
-                    break
-                if any(s["matchup_key"] == c["matchup_key"] for s in seleccionados):
-                    continue
-                if c in seleccionados:
-                    continue
-                seleccionados.append(c)
-            if len(seleccionados) >= 3:
-                break
-
-        if len(seleccionados) < 3:
-            restantes = sorted(
-                candidatos,
-                key=lambda x: (x["score_final"], x["confidence"], x["edge"], x["ev_pct"]),
-                reverse=True
-            )
-            for c in restantes:
-                if len(seleccionados) >= 3:
-                    break
-                if any(s["matchup_key"] == c["matchup_key"] for s in seleccionados):
-                    continue
-                if c in seleccionados:
-                    continue
-                seleccionados.append(c)
+        candidatos.sort(key=lambda x: (x["score_final"], x["confidence"], x["edge"], x["ev_pct"]), reverse=True)
+        seleccionados = candidatos[:3]
 
         texto = header("PARLEY DEL DÍA MLB", "🎯")
-        texto += f"📅 {hoy_str()}"
+        texto += f"📅 {hoy_str()}\n\n"
+
         if not seleccionados:
             texto += "No hay juegos suficientes hoy."
         else:
-            if len(tier1) >= 3:
-                texto += "✅ Selección premium del modelo"
-            else:
-                texto += "⚠️ No hubo 3 picks premium; se muestran los 3 mejores picks analizados por el bot."
             for p in seleccionados:
                 texto += card_game(
                     p["game"],
@@ -1874,24 +1845,19 @@ def parley(message):
                         f"🎯 Pick: <b>{p['pick']}</b>",
                         f"🧠 Confianza: <b>{p['confidence']}%</b>",
                         f"📈 Edge: <b>{p['edge']}%</b> | EV: <b>{p['ev_pct']}%</b>",
-                        f"🧮 Score: <b>{p['score_final']}</b>",
-                        f"💵 Cuota: <b>{p['cuota']}</b>",
-                        f"🎽 Pitchers: {p['pitchers']}",
-                        f"📉 ERA: {p['eras']}",
-                        f"🌡️ Temp: {p['weather'].get('temp_c')}°C | 💨 Viento: {p['weather'].get('wind_kmh')} km/h"
+                        f"💵 Cuota: <b>{p['cuota']}</b>"
                     ]
                 )
+
+            legs = [{"game": p["game"], "pick": p["pick"], "confidence": p["confidence"]} for p in seleccionados]
+            registrar_parley_del_dia("parley", legs)
 
         bot.edit_message_text(texto, msg.chat.id, msg.message_id, parse_mode="HTML")
 
     except Exception as e:
         import traceback
         print(traceback.format_exc())
-        bot.edit_message_text(
-            f"❌ Error en /parley: {str(e)[:120]}",
-            msg.chat.id,
-            msg.message_id
-        )
+        bot.edit_message_text(f"❌ Error en /parley: {str(e)[:120]}", msg.chat.id, msg.message_id)
 
 
 @bot.message_handler(commands=["posiciones"])
@@ -1974,12 +1940,26 @@ def posiciones(message):
         )
 @bot.message_handler(commands=["parley_millonario"])
 def parley_millonario(message):
-    msg = bot.reply_to(message, "💎 Construyendo parley millonario SOLO TOTALS...")
+    msg = bot.reply_to(message, "💎 Construyendo parley millonario del día...")
     try:
+        parley_existente = buscar_parley_del_dia("parley_millonario")
+        if parley_existente:
+            texto = header("PARLEY MILLONARIO (FIJO)", "💎")
+            texto += f"📅 {parley_existente['fecha']}\n\n"
+            for leg in parley_existente.get("legs", []):
+                texto += card_game(
+                    leg["game"],
+                    [
+                        f"🔥 Pick: <b>{leg['pick']}</b>",
+                        f"🧠 Confianza: <b>{leg.get('confidence', 'N/D')}%</b>"
+                    ]
+                )
+            bot.edit_message_text(texto, msg.chat.id, msg.message_id, parse_mode="HTML")
+            return
+
         standings = obtener_standings()
         games = obtener_juegos_del_dia()
-
-        max_picks = min(10, len(games))
+        candidatos_ml = []
         candidatos_totals = []
 
         for g in games:
@@ -2006,12 +1986,7 @@ def parley_millonario(message):
 
                 away_stats = obtener_stats_pitcher_reales(away_pid)
                 home_stats = obtener_stats_pitcher_reales(home_pid)
-
-                weather = obtener_clima_partido(g) or {
-                    "temp_c": None,
-                    "wind_kmh": None,
-                    "precip_mm": None
-                }
+                weather = obtener_clima_partido(g) or {"temp_c": None, "wind_kmh": None, "precip_mm": None}
 
                 pred = obtener_pick_juego_pro(
                     away, home, standings,
@@ -2027,13 +2002,36 @@ def parley_millonario(message):
 
                 odds = obtener_odds_completas(away, home)
 
+                if not pred["avoid"]:
+                    cuota_ml = "N/D"
+                    edge_ml = 0.0
+                    if odds and isinstance(odds, dict):
+                        if pred["favorite"] == home and odds.get("home_moneyline") is not None:
+                            cuota_ml = odds.get("home_moneyline")
+                        elif pred["favorite"] == away and odds.get("away_moneyline") is not None:
+                            cuota_ml = odds.get("away_moneyline")
+
+                        if cuota_ml != "N/D":
+                            implied_ml = moneyline_to_prob(cuota_ml)
+                            if implied_ml is not None:
+                                edge_ml = round((pred["prob_favorite"] - implied_ml) * 100, 1)
+
+                    score_ml = pred["confidence_pct"] * 0.80 + edge_ml * 0.80
+                    candidatos_ml.append({
+                        "tipo": "ML",
+                        "game": f"{away} @ {home}",
+                        "matchup_key": matchup_key,
+                        "pick": f"{pred['favorite']} ML",
+                        "confidence": pred["confidence_pct"],
+                        "edge": edge_ml,
+                        "score": round(score_ml, 2),
+                        "cuota": cuota_ml
+                    })
+
                 total_pick = None
                 cuota_total = "N/D"
-
                 if odds and isinstance(odds, dict) and odds.get("total_line") is not None:
-                    total_line = odds.get("total_line")
-                    total_pick = elegir_total_pick(total_proj, total_line)
-
+                    total_pick = elegir_total_pick(total_proj, odds.get("total_line"))
                     if total_pick:
                         cuota_total = odds.get("over_price") if "Over" in total_pick["pick"] else odds.get("under_price")
 
@@ -2041,8 +2039,7 @@ def parley_millonario(message):
                     total_pick = elegir_total_pick_fallback(total_proj)
 
                 if total_pick:
-                    score_total = (abs(total_pick["edge"]) * 2.0) + (pred["confidence_pct"] * 0.35)
-
+                    score_total = abs(total_pick["edge"]) * 2.5 + pred["confidence_pct"] * 0.45
                     candidatos_totals.append({
                         "tipo": "TOTAL",
                         "game": f"{away} @ {home}",
@@ -2050,71 +2047,63 @@ def parley_millonario(message):
                         "pick": total_pick["pick"],
                         "confidence": pred["confidence_pct"],
                         "edge": round(abs(total_pick["edge"]), 2),
-                        "score_total": round(score_total, 2),
-                        "cuota": cuota_total,
-                        "pitchers": f"{away_p} vs {home_p}",
-                        "eras": f"{away_stats['era']} vs {home_stats['era']}",
-                        "weather": weather,
-                        "total_proj": total_proj
+                        "score": round(score_total, 2),
+                        "cuota": cuota_total
                     })
-
             except Exception as game_error:
                 print(f"Error procesando juego en /parley_millonario: {game_error}")
                 continue
 
+        candidatos_ml = filtrar_matchups_unicos(candidatos_ml)
         candidatos_totals = filtrar_matchups_unicos(candidatos_totals)
 
-        premium = [c for c in candidatos_totals if c["edge"] >= 0.50]
-        medios = [c for c in candidatos_totals if 0.25 <= c["edge"] < 0.50]
-        suaves = [c for c in candidatos_totals if c["edge"] < 0.25]
-
-        premium.sort(key=lambda x: (x["edge"], x["score_total"]), reverse=True)
-        medios.sort(key=lambda x: (x["edge"], x["score_total"]), reverse=True)
-        suaves.sort(key=lambda x: (x["edge"], x["score_total"]), reverse=True)
+        candidatos_ml.sort(key=lambda x: (x["score"], x["confidence"], x["edge"]), reverse=True)
+        candidatos_totals.sort(key=lambda x: (x["score"], x["edge"], x["confidence"]), reverse=True)
 
         seleccionados = []
-
-        for pool in (premium, medios, suaves):
-            for c in pool:
-                if len(seleccionados) >= max_picks:
-                    break
-                if any(s["matchup_key"] == c["matchup_key"] for s in seleccionados):
-                    continue
+        for c in candidatos_ml[:2]:
+            if not any(s["matchup_key"] == c["matchup_key"] for s in seleccionados):
                 seleccionados.append(c)
-            if len(seleccionados) >= max_picks:
+        for c in candidatos_totals:
+            if len(seleccionados) >= 5:
                 break
+            if not any(s["matchup_key"] == c["matchup_key"] for s in seleccionados):
+                seleccionados.append(c)
 
-        texto = header("PARLEY MILLONARIO SOLO TOTALS", "💎")
-        texto += f"📅 {hoy_str()}"
+        mezclados = sorted(candidatos_ml + candidatos_totals, key=lambda x: (x["score"], x["confidence"]), reverse=True)
+        for c in mezclados:
+            if len(seleccionados) >= 5:
+                break
+            if any(s["matchup_key"] == c["matchup_key"] for s in seleccionados):
+                continue
+            seleccionados.append(c)
+
+        texto = header("PARLEY MILLONARIO 5 PICKS", "💎")
+        texto += f"📅 {hoy_str()}\n\n"
+
         if not seleccionados:
-            texto += "No hubo juegos analizables hoy."
+            texto += "No hay juegos suficientes hoy."
         else:
-            texto += f"📌 Totals seleccionados: <b>{len(seleccionados)}</b>/{max_picks}"
-            for p in seleccionados:
+            for p in seleccionados[:5]:
                 texto += card_game(
                     p["game"],
                     [
-                        f"🔥 Pick: <b>{p['pick']}</b>",
-                        f"📈 Edge: <b>{p['edge']}%</b>",
-                        f"🧮 Score Total: <b>{p['score_total']}</b>",
-                        f"💵 Cuota: <b>{p['cuota']}</b>",
-                        f"📊 Total proyectado: <b>{p['total_proj']}</b>",
-                        f"🎽 Pitchers: {p['pitchers']}",
-                        f"📉 ERA: {p['eras']}",
-                        f"🌡️ Temp: {p['weather'].get('temp_c')}°C | 💨 Viento: {p['weather'].get('wind_kmh')} km/h"
+                        f"🔥 {p['tipo']}: <b>{p['pick']}</b>",
+                        f"🧠 Confianza: <b>{p['confidence']}%</b>",
+                        f"📈 Edge: <b>{p['edge']}</b>",
+                        f"💵 Cuota: <b>{p['cuota']}</b>"
                     ]
                 )
+
+            legs = [{"game": p["game"], "pick": p["pick"], "confidence": p["confidence"]} for p in seleccionados[:5]]
+            registrar_parley_del_dia("parley_millonario", legs)
 
         bot.edit_message_text(texto, msg.chat.id, msg.message_id, parse_mode="HTML")
 
     except Exception as e:
         import traceback
         print(traceback.format_exc())
-        bot.edit_message_text(
-            f"❌ Error en /parley_millonario: {str(e)[:120]}",
-            msg.chat.id,
-            msg.message_id
-        )
+        bot.edit_message_text(f"❌ Error en /parley_millonario: {str(e)[:120]}", msg.chat.id, msg.message_id)
 
 
 @bot.message_handler(commands=["pitchers"])
@@ -2184,13 +2173,32 @@ def pronosticos(message):
 
         for g in games:
             teams = g.get("teams", {})
-            away = teams.get("away", {}).get("team", {}).get("name")
-            home = teams.get("home", {}).get("team", {}).get("name")
+            away_data = teams.get("away", {})
+            home_data = teams.get("home", {})
 
+            away = away_data.get("team", {}).get("name")
+            home = home_data.get("team", {}).get("name")
             if not away or not home:
                 continue
 
-            pred = obtener_pick_juego_pro(away, home, standings)
+            away_pitcher_obj = away_data.get("probablePitcher", {}) or {}
+            home_pitcher_obj = home_data.get("probablePitcher", {}) or {}
+
+            away_p = away_pitcher_obj.get("fullName", "TBD")
+            home_p = home_pitcher_obj.get("fullName", "TBD")
+
+            away_pid = away_pitcher_obj.get("id")
+            home_pid = home_pitcher_obj.get("id")
+
+            away_stats = obtener_stats_pitcher_reales(away_pid)
+            home_stats = obtener_stats_pitcher_reales(home_pid)
+            weather = obtener_clima_partido(g) or {"temp_c": None, "wind_kmh": None, "precip_mm": None}
+
+            pred = obtener_pick_juego_pro(
+                away, home, standings,
+                away_p, home_p,
+                away_stats, home_stats, weather
+            )
 
             picks.append({
                 "game": f"{away} @ {home}",
@@ -2357,5 +2365,63 @@ def roi(message):
         bot.reply_to(message, f"❌ Error calculando ROI: {str(e)[:120]}")
 
 
+
+@bot.message_handler(commands=["parley_ganado"])
+def parley_ganado(message):
+    ok = actualizar_estado_parley(hoy_str(), "parley", "ganado")
+    bot.reply_to(message, "✅ Parley del día marcado como GANADO." if ok else "❌ No encontré parley del día para marcar.")
+
+@bot.message_handler(commands=["parley_fallado"])
+def parley_fallado(message):
+    ok = actualizar_estado_parley(hoy_str(), "parley", "fallado")
+    bot.reply_to(message, "❌ Parley del día marcado como FALLADO." if ok else "❌ No encontré parley del día para marcar.")
+
+@bot.message_handler(commands=["millonario_ganado"])
+def millonario_ganado(message):
+    ok = actualizar_estado_parley(hoy_str(), "parley_millonario", "ganado")
+    bot.reply_to(message, "✅ Parley millonario marcado como GANADO." if ok else "❌ No encontré parley millonario del día.")
+
+@bot.message_handler(commands=["millonario_fallado"])
+def millonario_fallado(message):
+    ok = actualizar_estado_parley(hoy_str(), "parley_millonario", "fallado")
+    bot.reply_to(message, "❌ Parley millonario marcado como FALLADO." if ok else "❌ No encontré parley millonario del día.")
+
+@bot.message_handler(commands=["stats_parleys"])
+def stats_parleys(message):
+    parleys = cargar_parleys_diarios()
+    stats = {
+        "parley": {"ganado": 0, "fallado": 0},
+        "parley_millonario": {"ganado": 0, "fallado": 0}
+    }
+
+    for p in parleys:
+        tipo = p.get("tipo")
+        estado = p.get("estado")
+        if tipo in stats and estado in ["ganado", "fallado"]:
+            stats[tipo][estado] += 1
+
+    total_parley = stats["parley"]["ganado"] + stats["parley"]["fallado"]
+    total_millonario = stats["parley_millonario"]["ganado"] + stats["parley_millonario"]["fallado"]
+
+    efectividad_parley = round((stats["parley"]["ganado"] / total_parley) * 100, 2) if total_parley > 0 else 0
+    efectividad_millonario = round((stats["parley_millonario"]["ganado"] / total_millonario) * 100, 2) if total_millonario > 0 else 0
+
+    texto = header("ESTADÍSTICAS DE PARLEYS", "📊")
+    texto += (
+        f"🎯 <b>Parley diario</b>\n"
+        f"✅ Ganados: <b>{stats['parley']['ganado']}</b>\n"
+        f"❌ Fallados: <b>{stats['parley']['fallado']}</b>\n"
+        f"📈 Efectividad: <b>{efectividad_parley}%</b>\n\n"
+        f"💎 <b>Parley millonario</b>\n"
+        f"✅ Ganados: <b>{stats['parley_millonario']['ganado']}</b>\n"
+        f"❌ Fallados: <b>{stats['parley_millonario']['fallado']}</b>\n"
+        f"📈 Efectividad: <b>{efectividad_millonario}%</b>\n"
+    )
+    bot.reply_to(message, texto, parse_mode="HTML")
+
+
+import time
 print(f"INICIANDO BOT {BOT_VERSION}")
-bot.infinity_polling(skip_pending=True, timeout=30, long_polling_timeout=30)
+bot.remove_webhook()
+time.sleep(1)
+bot.infinity_polling(skip_pending=True, timeout=30, long_polling_timeout=30, allowed_updates=["message", "callback_query"])
