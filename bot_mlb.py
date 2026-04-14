@@ -2052,6 +2052,7 @@ def parley_millonario(message):
 
         standings = obtener_standings()
         games = obtener_juegos_del_dia()
+
         candidatos_ml = []
         candidatos_totals = []
 
@@ -2082,7 +2083,11 @@ def parley_millonario(message):
                 away_stats = obtener_stats_pitcher_reales(away_pid)
                 home_stats = obtener_stats_pitcher_reales(home_pid)
 
-                weather = obtener_clima_partido(g) or {"temp_c": None, "wind_kmh": None, "precip_mm": None}
+                weather = obtener_clima_partido(g) or {
+                    "temp_c": None,
+                    "wind_kmh": None,
+                    "precip_mm": None
+                }
 
                 pred = obtener_pick_juego_pro(
                     away, home, standings,
@@ -2098,7 +2103,9 @@ def parley_millonario(message):
 
                 odds = obtener_odds_completas(away, home)
 
-                # ML candidates
+                # =========================
+                # CANDIDATO ML
+                # =========================
                 if not pred["avoid"]:
                     cuota_ml = "N/D"
                     edge_ml = 0.0
@@ -2114,7 +2121,10 @@ def parley_millonario(message):
                             if implied_ml is not None:
                                 edge_ml = round((pred["prob_favorite"] - implied_ml) * 100, 1)
 
-                    penalizacion_local = -3.0 if pred["favorite"] == home and pred["confidence_pct"] <= 51.0 else 0.0
+                    penalizacion_local = 0.0
+                    if pred["favorite"] == home and pred["confidence_pct"] <= 51.0:
+                        penalizacion_local = -3.0
+
                     score_ml = pred["confidence_pct"] * 0.85 + edge_ml * 0.90 + penalizacion_local
 
                     candidatos_ml.append({
@@ -2129,20 +2139,39 @@ def parley_millonario(message):
                         "is_home_pick": pred["favorite"] == home
                     })
 
-                # TOTAL candidates
+                # =========================
+                # CANDIDATO TOTAL (FORZADO)
+                # =========================
                 total_pick = None
                 cuota_total = "N/D"
 
+                # 1) si hay línea real, úsala
                 if odds and isinstance(odds, dict) and odds.get("total_line") is not None:
                     total_pick = elegir_total_pick(total_proj, odds.get("total_line"))
                     if total_pick:
                         cuota_total = odds.get("over_price") if "Over" in total_pick["pick"] else odds.get("under_price")
 
+                # 2) si no hay línea o no salió pick, forzar según proyección
                 if total_pick is None:
-                    total_pick = elegir_total_pick_fallback(total_proj)
+                    if total_proj >= 9.2:
+                        total_pick = {
+                            "pick": "Over 8.5",
+                            "edge": round(abs(total_proj - 8.5), 2),
+                            "strength": "Forzado"
+                        }
+                    elif total_proj <= 7.8:
+                        total_pick = {
+                            "pick": "Under 8.5",
+                            "edge": round(abs(total_proj - 8.5), 2),
+                            "strength": "Forzado"
+                        }
+                    else:
+                        # rango medio: usar fallback tradicional
+                        total_pick = elegir_total_pick_fallback(total_proj)
 
                 if total_pick:
-                    score_total = abs(total_pick["edge"]) * 3.2 + pred["confidence_pct"] * 0.40
+                    score_total = abs(total_pick["edge"]) * 3.4 + pred["confidence_pct"] * 0.45
+
                     candidatos_totals.append({
                         "tipo": "TOTAL",
                         "game": f"{away} @ {home}",
@@ -2166,7 +2195,9 @@ def parley_millonario(message):
 
         seleccionados = []
 
-        # Force exactly 3 totals first
+        # =========================
+        # 1) FORZAR 3 TOTALS
+        # =========================
         for c in candidatos_totals:
             if len([x for x in seleccionados if x["tipo"] == "TOTAL"]) >= 3:
                 break
@@ -2174,22 +2205,32 @@ def parley_millonario(message):
                 continue
             seleccionados.append(c)
 
-        # Force exactly 2 ML
+        # =========================
+        # 2) FORZAR 2 ML
+        # =========================
         home_ml_count = 0
         for c in candidatos_ml:
             if len([x for x in seleccionados if x["tipo"] == "ML"]) >= 2:
                 break
             if any(s["matchup_key"] == c["matchup_key"] for s in seleccionados):
                 continue
+
             if c["is_home_pick"] and c["confidence"] <= 51.0 and home_ml_count >= 1:
                 continue
+
             seleccionados.append(c)
             if c["is_home_pick"]:
                 home_ml_count += 1
 
-        # Fallback if not enough
+        # =========================
+        # 3) FALLBACK HASTA 5
+        # =========================
         if len(seleccionados) < 5:
-            mezclados = sorted(candidatos_totals + candidatos_ml, key=lambda x: (x["score"], x["confidence"]), reverse=True)
+            mezclados = sorted(
+                candidatos_totals + candidatos_ml,
+                key=lambda x: (x["score"], x["confidence"]),
+                reverse=True
+            )
             for c in mezclados:
                 if len(seleccionados) >= 5:
                     break
@@ -2197,8 +2238,11 @@ def parley_millonario(message):
                     continue
                 seleccionados.append(c)
 
-        # Totals first visually
-        seleccionados = sorted(seleccionados[:5], key=lambda x: (0 if x["tipo"] == "TOTAL" else 1, -x["score"]))
+        # totals primero visualmente
+        seleccionados = sorted(
+            seleccionados[:5],
+            key=lambda x: (0 if x["tipo"] == "TOTAL" else 1, -x["score"])
+        )
 
         texto = header("PARLEY MILLONARIO 5 PICKS", "💎")
         texto += f"📅 {hoy_str()}\n\n"
@@ -2217,7 +2261,14 @@ def parley_millonario(message):
                     ]
                 )
 
-            legs = [{"game": p["game"], "pick": p["pick"], "confidence": p["confidence"]} for p in seleccionados]
+            legs = [
+                {
+                    "game": p["game"],
+                    "pick": p["pick"],
+                    "confidence": p["confidence"]
+                }
+                for p in seleccionados
+            ]
             registrar_parley_del_dia("parley_millonario", legs)
 
         bot.edit_message_text(texto, msg.chat.id, msg.message_id, parse_mode="HTML")
@@ -2225,8 +2276,11 @@ def parley_millonario(message):
     except Exception as e:
         import traceback
         print(traceback.format_exc())
-        bot.edit_message_text(f"❌ Error en /parley_millonario: {str(e)[:120]}", msg.chat.id, msg.message_id)
-
+        bot.edit_message_text(
+            f"❌ Error en /parley_millonario: {str(e)[:120]}",
+            msg.chat.id,
+            msg.message_id
+        )
 
 @bot.message_handler(commands=["pitchers"])
 def pitchers(message):
