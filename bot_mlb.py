@@ -164,21 +164,23 @@ def card_game(title, lines):
 def menu_markup():
     markup = InlineKeyboardMarkup(row_width=2)
     markup.add(
-        InlineKeyboardButton("📅 Hoy", callback_data="cmd_hoy"),
-        InlineKeyboardButton("🏆 Posiciones", callback_data="cmd_posiciones"),
-        InlineKeyboardButton("💰 Apuestas", callback_data="cmd_apuestas"),
-        InlineKeyboardButton("🎯 Parley", callback_data="cmd_parley"),
-        InlineKeyboardButton("💎 Parley Mill.", callback_data="cmd_parley_millonario"),
-        InlineKeyboardButton("🧢 Pitchers", callback_data="cmd_pitchers"),
-        InlineKeyboardButton("📊 Pronósticos", callback_data="cmd_pronosticos"),
-        InlineKeyboardButton("🚨 Lesionados", callback_data="cmd_lesionados"),
-        InlineKeyboardButton("📈 ROI", callback_data="cmd_roi"),
-        InlineKeyboardButton("📦 Exportar JSON", callback_data="cmd_exportar_json"),
-        InlineKeyboardButton("📊 Stats Parlays", callback_data="cmd_stats_parlays"),
-        InlineKeyboardButton("✅ Parley G", callback_data="cmd_parley_ganado"),
-        InlineKeyboardButton("❌ Parley F", callback_data="cmd_parley_fallado"),
-        InlineKeyboardButton("💎✅ Mill G", callback_data="cmd_millonario_ganado"),
-        InlineKeyboardButton("💎❌ Mill F", callback_data="cmd_millonario_fallado")
+      InlineKeyboardButton("📅 Hoy", callback_data="cmd_hoy"),
+InlineKeyboardButton("🏆 Posiciones", callback_data="cmd_posiciones"),
+InlineKeyboardButton("💰 Apuestas", callback_data="cmd_apuestas"),
+InlineKeyboardButton("🎯 Parley", callback_data="cmd_parley"),
+InlineKeyboardButton("💎 Parley Mill.", callback_data="cmd_parley_millonario"),
+InlineKeyboardButton("🧢 Pitchers", callback_data="cmd_pitchers"),
+InlineKeyboardButton("📊 Pronósticos", callback_data="cmd_pronosticos"),
+InlineKeyboardButton("🚨 Lesionados", callback_data="cmd_lesionados"),
+InlineKeyboardButton("📈 ROI", callback_data="cmd_roi"),
+InlineKeyboardButton("📦 Exportar JSON", callback_data="cmd_exportar_json"),
+InlineKeyboardButton("📊 Stats Parlays", callback_data="cmd_stats_parlays"),
+InlineKeyboardButton("✅ Parley G", callback_data="cmd_parley_ganado"),
+InlineKeyboardButton("❌ Parley F", callback_data="cmd_parley_fallado"),
+InlineKeyboardButton("💎✅ Mill G", callback_data="cmd_millonario_ganado"),
+InlineKeyboardButton("💎❌ Mill F", callback_data="cmd_millonario_fallado"),
+InlineKeyboardButton("♻️ Reset Parley", callback_data="cmd_reset_parley"),
+InlineKeyboardButton("♻️ Reset Mill", callback_data="cmd_reset_millonario")
     )
     return markup
 
@@ -1372,6 +1374,10 @@ def callback_menu(call):
             millonario_ganado(call.message)
         elif call.data == "cmd_millonario_fallado":
             millonario_fallado(call.message)
+        elif call.data == "cmd_reset_parley":
+            reset_parley(call.message)
+        elif call.data == "cmd_reset_millonario":
+            reset_millonario(call.message)
 
     except Exception as e:
         try:
