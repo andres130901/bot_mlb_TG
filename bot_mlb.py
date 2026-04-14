@@ -1983,6 +1983,28 @@ def posiciones(message):
             msg.chat.id,
             msg.message_id
         )
+   
+@bot.message_handler(commands=["reset_millonario"])
+def reset_millonario(message):
+    data = cargar_parleys_diarios()
+    hoy = hoy_str()
+
+    nuevo = []
+    borrado = False
+
+    for p in data:
+        if p.get("fecha") == hoy and p.get("tipo") == "parley_millonario":
+            borrado = True
+            continue
+        nuevo.append(p)
+
+    guardar_parleys_diarios(nuevo)
+
+    if borrado:
+        bot.reply_to(message, "♻️ Parley millonario del día reiniciado.")
+    else:
+        bot.reply_to(message, "No había parley millonario guardado hoy.")     
+        
 @bot.message_handler(commands=["parley_millonario"])
 def parley_millonario(message):
     msg = bot.reply_to(message, "💎 Construyendo parley millonario del día...")
