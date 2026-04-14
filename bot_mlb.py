@@ -126,7 +126,24 @@ def actualizar_estado_parley(fecha, tipo, estado):
     if actualizado:
         guardar_parleys_diarios(data)
     return actualizado
+def eliminar_parley_del_dia(tipo, fecha=None):
+    if fecha is None:
+        fecha = hoy_str()
 
+    data = cargar_parleys_diarios()
+    nuevo = []
+    borrado = False
+
+    for p in data:
+        if p.get("fecha") == fecha and p.get("tipo") == tipo:
+            borrado = True
+            continue
+        nuevo.append(p)
+
+    if borrado:
+        guardar_parleys_diarios(nuevo)
+
+    return borrado
 
 # =========================================================
 # ESTILO VISUAL
@@ -1987,6 +2004,18 @@ def posiciones(message):
             msg.chat.id,
             msg.message_id
         )
+        
+@bot.message_handler(commands=["reset_millonario"])
+def reset_millonario(message):
+    try:
+        borrado = eliminar_parley_del_dia("parley_millonario")
+
+        if borrado:
+            bot.reply_to(message, "♻️ Parley millonario del día reiniciado correctamente.")
+        else:
+            bot.reply_to(message, "No había parley millonario guardado hoy.")
+    except Exception as e:
+        bot.reply_to(message, f"❌ Error al resetear millonario: {str(e)[:120]}")
 @bot.message_handler(commands=["parley_millonario"])
 def parley_millonario(message):
     msg = bot.reply_to(message, "💎 Construyendo parley millonario del día...")
