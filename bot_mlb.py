@@ -600,40 +600,34 @@ def score_pitcher_real(stats):
     score = 0.0
 
     if era <= 2.80:
-        score += 0.45
-    elif era <= 3.30:
-        score += 0.30
-    elif era <= 3.90:
-        score += 0.14
-    elif era >= 5.20:
-        score -= 0.24
-    elif era >= 4.60:
-        score -= 0.12
+        score += 0.32
+    elif era <= 3.40:
+        score += 0.22
+    elif era <= 4.00:
+        score += 0.10
+    elif era > 4.60:
+        score -= 0.14
 
     if whip <= 1.05:
-        score += 0.28
-    elif whip <= 1.15:
-        score += 0.18
-    elif whip <= 1.25:
-        score += 0.08
-    elif whip >= 1.45:
-        score -= 0.16
-    elif whip >= 1.35:
-        score -= 0.08
+        score += 0.20
+    elif whip <= 1.18:
+        score += 0.12
+    elif whip <= 1.30:
+        score += 0.04
+    elif whip > 1.40:
+        score -= 0.10
 
     if so9 >= 10.5:
-        score += 0.15
-    elif so9 >= 9.2:
-        score += 0.09
-    elif so9 >= 8.2:
-        score += 0.04
+        score += 0.12
+    elif so9 >= 9.0:
+        score += 0.08
+    elif so9 >= 8.0:
+        score += 0.03
     elif so9 < 6.5:
-        score -= 0.08
+        score -= 0.05
 
     if not sample_ok or ip < 10:
-        score *= 0.70
-    elif ip >= 30:
-        score *= 1.10
+        score *= 0.75
 
     return round(score, 3)
 
@@ -694,10 +688,10 @@ def calcular_probabilidad_local_pro(
     diff_win_pct = home["win_pct"] - away["win_pct"]
     diff_split = home["home_win_pct"] - away["away_win_pct"]
     diff_last10 = home["last10_win_pct"] - away["last10_win_pct"]
-    diff_run_diff = (home["run_diff"] - away["run_diff"]) / 60.0
+    diff_run_diff = (home["run_diff"] - away["run_diff"]) / 100.0
     diff_streak = parse_streak(home["streak"]) - parse_streak(away["streak"])
-    diff_runs_scored = (home.get("runs_scored", 4.5) - away.get("runs_scored", 4.5)) / 3.0
-    diff_runs_allowed = (away.get("runs_allowed", 4.5) - home.get("runs_allowed", 4.5)) / 3.0
+    diff_runs_scored = (home.get("runs_scored", 4.5) - away.get("runs_scored", 4.5)) / 10.0
+    diff_runs_allowed = (away.get("runs_allowed", 4.5) - home.get("runs_allowed", 4.5)) / 10.0
 
     if away_pitcher_stats is None:
         away_pitcher_stats = {"era": 4.20, "whip": 1.30, "so9": 8.2, "ip": 0.0, "sample_ok": False}
@@ -709,33 +703,31 @@ def calcular_probabilidad_local_pro(
     diff_pitcher = p_home - p_away
 
     score = 0.0
-    score += diff_win_pct * 4.0
-    score += diff_split * 2.8
-    score += diff_last10 * 1.7
-    score += diff_run_diff * 2.4
-    score += diff_streak * 1.2
-    score += diff_runs_scored * 1.2
-    score += diff_runs_allowed * 1.2
-    score += diff_pitcher * 3.4
-    score += 0.03
+    score += diff_win_pct * 2.8
+    score += diff_split * 1.9
+    score += diff_last10 * 1.2
+    score += diff_run_diff * 1.6
+    score += diff_streak * 1.0
+    score += diff_runs_scored * 0.9
+    score += diff_runs_allowed * 0.9
+    score += diff_pitcher * 1.8
+    score += 0.09
     score += ajuste_clima_ml(weather)
 
     if away_pitcher == "TBD":
-        score += 0.06
+        score += 0.04
     if home_pitcher == "TBD":
-        score -= 0.06
-
-    if away_pitcher_stats.get("ip", 0) < 10:
-        score *= 0.94
-    if home_pitcher_stats.get("ip", 0) < 10:
-        score *= 0.94
+        score -= 0.04
 
     prob = logistic(score)
 
     if 0.495 <= prob <= 0.505:
-        prob = 0.515 if score >= 0 else 0.485
+        if score >= 0:
+            prob = 0.518
+        else:
+            prob = 0.482
 
-    return clamp(prob, 0.33, 0.67)
+    return clamp(prob, 0.32, 0.68)
 
 def obtener_pick_juego_pro(
     away_team, home_team, standings,
@@ -1363,7 +1355,6 @@ def callback_menu(call):
             millonario_ganado(call.message)
         elif call.data == "cmd_millonario_fallado":
             millonario_fallado(call.message)
-
     except Exception as e:
         try:
             bot.send_message(call.message.chat.id, f"❌ Error en botón: {str(e)[:120]}")
@@ -1383,7 +1374,7 @@ def start(message):
         "• Totales con modelo\n"
         "• ERA real + clima\n"
         "• Parlays filtrados\n"
-        "• Parlays fijos + tracking\n\n"
+        "• Fallback al modelo\n\n"
         f"🧪 Versión activa: <b>{BOT_VERSION}</b>\n\n"
         "Selecciona una opción:"
     )
@@ -1837,7 +1828,8 @@ def parley(message):
                         if ev_calc is not None:
                             ev_pct = round(ev_calc * 100, 2)
 
-                score_final = pred["confidence_pct"] * 0.75 + edge * 0.9 + ev_pct * 1.1
+                sesgo_local = -2.5 if (pred["favorite"] == home and pred["confidence_pct"] <= 51.0) else 0.0
+                score_final = (pred["confidence_pct"] * 0.75) + (edge * 1.10) + (ev_pct * 1.25) + sesgo_local
 
                 candidatos.append({
                     "game": f"{away} @ {home}",
@@ -1847,7 +1839,8 @@ def parley(message):
                     "edge": edge,
                     "ev_pct": ev_pct,
                     "score_final": round(score_final, 2),
-                    "cuota": cuota
+                    "cuota": cuota,
+                    "is_home_pick": pred["favorite"] == home
                 })
             except Exception as game_error:
                 print(f"Error procesando juego en /parley: {game_error}")
@@ -1855,11 +1848,32 @@ def parley(message):
 
         candidatos = filtrar_matchups_unicos(candidatos)
         candidatos.sort(key=lambda x: (x["score_final"], x["confidence"], x["edge"], x["ev_pct"]), reverse=True)
-        seleccionados = candidatos[:3]
+
+        seleccionados = []
+        home_count = 0
+        for c in candidatos:
+            if len(seleccionados) >= 3:
+                break
+            if any(s["matchup_key"] == c["matchup_key"] for s in seleccionados):
+                continue
+            if c["is_home_pick"] and home_count >= 2:
+                continue
+            seleccionados.append(c)
+            if c["is_home_pick"]:
+                home_count += 1
+
+        if len(seleccionados) < 3:
+            for c in candidatos:
+                if len(seleccionados) >= 3:
+                    break
+                if any(s["matchup_key"] == c["matchup_key"] for s in seleccionados):
+                    continue
+                if c in seleccionados:
+                    continue
+                seleccionados.append(c)
 
         texto = header("PARLEY DEL DÍA MLB", "🎯")
         texto += f"📅 {hoy_str()}\n\n"
-
         if not seleccionados:
             texto += "No hay juegos suficientes hoy."
         else:
@@ -1980,19 +1994,19 @@ def parley_millonario(message):
             bot.edit_message_text(texto, msg.chat.id, msg.message_id, parse_mode="HTML")
             return
 
+        parley_diario = buscar_parley_del_dia("parley")
+        matchups_bloqueados = set()
+        if parley_diario:
+            for leg in parley_diario.get("legs", []):
+                game = leg.get("game", "")
+                if " @ " in game:
+                    away, home = game.split(" @ ", 1)
+                    matchups_bloqueados.add(normalizar_matchup(away, home))
+
         standings = obtener_standings()
         games = obtener_juegos_del_dia()
         candidatos_ml = []
         candidatos_totals = []
-
-        parley_hoy = buscar_parley_del_dia("parley")
-        excluir_matchups = set()
-        if parley_hoy:
-            for leg in parley_hoy.get("legs", []):
-                game = leg.get("game", "")
-                if " @ " in game:
-                    away, home = game.split(" @ ", 1)
-                    excluir_matchups.add(normalizar_matchup(away, home))
 
         for g in games:
             try:
@@ -2006,12 +2020,11 @@ def parley_millonario(message):
                     continue
 
                 matchup_key = normalizar_matchup(away, home)
-                if matchup_key in excluir_matchups:
+                if matchup_key in matchups_bloqueados:
                     continue
 
                 away_pitcher_obj = away_data.get("probablePitcher", {}) or {}
                 home_pitcher_obj = home_data.get("probablePitcher", {}) or {}
-
                 away_p = away_pitcher_obj.get("fullName", "TBD")
                 home_p = home_pitcher_obj.get("fullName", "TBD")
                 away_pid = away_pitcher_obj.get("id")
@@ -2038,7 +2051,8 @@ def parley_millonario(message):
                             if implied_ml is not None:
                                 edge_ml = round((pred["prob_favorite"] - implied_ml) * 100, 1)
 
-                    score_ml = pred["confidence_pct"] * 0.85 + edge_ml * 0.80
+                    penalizacion_local = -3.0 if (pred["favorite"] == home and pred["confidence_pct"] <= 51.0) else 0.0
+                    score_ml = pred["confidence_pct"] * 0.80 + edge_ml * 0.80 + penalizacion_local
                     candidatos_ml.append({
                         "tipo": "ML",
                         "game": f"{away} @ {home}",
@@ -2047,7 +2061,8 @@ def parley_millonario(message):
                         "confidence": pred["confidence_pct"],
                         "edge": edge_ml,
                         "score": round(score_ml, 2),
-                        "cuota": cuota_ml
+                        "cuota": cuota_ml,
+                        "is_home_pick": pred["favorite"] == home
                     })
 
                 total_pick = None
@@ -2060,7 +2075,7 @@ def parley_millonario(message):
                     total_pick = elegir_total_pick_fallback(total_proj)
 
                 if total_pick:
-                    score_total = abs(total_pick["edge"]) * 3.0 + pred["confidence_pct"] * 0.40
+                    score_total = abs(total_pick["edge"]) * 3.0 + pred["confidence_pct"] * 0.35
                     candidatos_totals.append({
                         "tipo": "TOTAL",
                         "game": f"{away} @ {home}",
@@ -2077,25 +2092,31 @@ def parley_millonario(message):
 
         candidatos_ml = filtrar_matchups_unicos(candidatos_ml)
         candidatos_totals = filtrar_matchups_unicos(candidatos_totals)
-
         candidatos_ml.sort(key=lambda x: (x["score"], x["confidence"], x["edge"]), reverse=True)
         candidatos_totals.sort(key=lambda x: (x["score"], x["edge"], x["confidence"]), reverse=True)
 
         seleccionados = []
-
-        for c in candidatos_ml:
-            if len([x for x in seleccionados if x["tipo"] == "ML"]) >= 2:
-                break
-            if not any(s["matchup_key"] == c["matchup_key"] for s in seleccionados):
-                seleccionados.append(c)
-
+        objetivo_totals = 4 if len(candidatos_totals) >= 4 else (3 if len(candidatos_totals) >= 3 else len(candidatos_totals))
         for c in candidatos_totals:
-            if len([x for x in seleccionados if x["tipo"] == "TOTAL"]) >= 3:
+            if len(seleccionados) >= objetivo_totals:
                 break
-            if not any(s["matchup_key"] == c["matchup_key"] for s in seleccionados):
-                seleccionados.append(c)
+            if any(s["matchup_key"] == c["matchup_key"] for s in seleccionados):
+                continue
+            seleccionados.append(c)
 
-        mezclados = sorted(candidatos_ml + candidatos_totals, key=lambda x: (x["score"], x["confidence"]), reverse=True)
+        home_ml_count = 0
+        for c in candidatos_ml:
+            if len(seleccionados) >= 5:
+                break
+            if any(s["matchup_key"] == c["matchup_key"] for s in seleccionados):
+                continue
+            if c["is_home_pick"] and home_ml_count >= 1:
+                continue
+            seleccionados.append(c)
+            if c["is_home_pick"]:
+                home_ml_count += 1
+
+        mezclados = sorted(candidatos_totals + candidatos_ml, key=lambda x: (x["score"], x["confidence"]), reverse=True)
         for c in mezclados:
             if len(seleccionados) >= 5:
                 break
@@ -2105,7 +2126,6 @@ def parley_millonario(message):
 
         texto = header("PARLEY MILLONARIO 5 PICKS", "💎")
         texto += f"📅 {hoy_str()}\n\n"
-
         if not seleccionados:
             texto += "No hay juegos suficientes hoy."
         else:
@@ -2206,10 +2226,8 @@ def pronosticos(message):
 
             away_pitcher_obj = away_data.get("probablePitcher", {}) or {}
             home_pitcher_obj = home_data.get("probablePitcher", {}) or {}
-
             away_p = away_pitcher_obj.get("fullName", "TBD")
             home_p = home_pitcher_obj.get("fullName", "TBD")
-
             away_pid = away_pitcher_obj.get("id")
             home_pid = home_pitcher_obj.get("id")
 
@@ -2217,11 +2235,7 @@ def pronosticos(message):
             home_stats = obtener_stats_pitcher_reales(home_pid)
             weather = obtener_clima_partido(g) or {"temp_c": None, "wind_kmh": None, "precip_mm": None}
 
-            pred = obtener_pick_juego_pro(
-                away, home, standings,
-                away_p, home_p,
-                away_stats, home_stats, weather
-            )
+            pred = obtener_pick_juego_pro(away, home, standings, away_p, home_p, away_stats, home_stats, weather)
 
             picks.append({
                 "game": f"{away} @ {home}",
@@ -2241,7 +2255,6 @@ def pronosticos(message):
             )
 
         bot.edit_message_text(texto, msg.chat.id, msg.message_id, parse_mode="HTML")
-
     except Exception as e:
         bot.edit_message_text(f"❌ Error: {str(e)[:120]}", msg.chat.id, msg.message_id)
 
@@ -2425,7 +2438,6 @@ def stats_parleys(message):
 
     total_parley = stats["parley"]["ganado"] + stats["parley"]["fallado"]
     total_millonario = stats["parley_millonario"]["ganado"] + stats["parley_millonario"]["fallado"]
-
     efectividad_parley = round((stats["parley"]["ganado"] / total_parley) * 100, 2) if total_parley > 0 else 0
     efectividad_millonario = round((stats["parley_millonario"]["ganado"] / total_millonario) * 100, 2) if total_millonario > 0 else 0
 
