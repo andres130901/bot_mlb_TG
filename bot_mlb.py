@@ -665,53 +665,116 @@ def normalizar_nombre_equipo_odds(team_name):
     }
     return mapping.get(team_name, team_name)
 
-def obtener_mejor_cuota(away_team, home_team):
-    if not ODDS_API_KEY:
+def obtener_mejor_cuota(away_team, home_team, force_fallback=False):
+    """
+    Obtiene la mejor cuota disponible.
+    Si force_fallback=True o no hay odds reales, usa odds simuladas basadas en el modelo.
+    """
+    if not ODDS_API_KEY and not force_fallback:
         return None
-    try:
-        url = "https://api.the-odds-api.com/v4/sports/baseball_mlb/odds"
-        params = {"apiKey": ODDS_API_KEY, "regions": "us", "markets": "h2h,totals", "oddsFormat": "american"}
-        data = safe_get(url, params=params)
-        if not isinstance(data, list):
-            return None
-        away_norm = normalizar_nombre_equipo_odds(away_team)
-        home_norm = normalizar_nombre_equipo_odds(home_team)
-        mejor = {"home_ml": None, "away_ml": None, "total_line": None, "over_price": None, "under_price": None}
-        for event in data:
-            home_name = event.get("home_team", "")
-            teams = event.get("teams", [])
-            away_name = teams[0] if len(teams) > 1 and teams[0] != home_name else teams[1] if len(teams) > 1 else ""
-            # Comparación normalizada
-            if normalizar_nombre_equipo_odds(home_name) == home_norm and normalizar_nombre_equipo_odds(away_name) == away_norm:
-                for book in event.get("bookmakers", []):
-                    for market in book.get("markets", []):
-                        if market.get("key") == "h2h":
-                            for outcome in market.get("outcomes", []):
-                                if normalizar_nombre_equipo_odds(outcome.get("name", "")) == home_norm:
+    
+    # Intentar múltiples regiones
+    regiones = ["us", "uk", "eu", "au"]
+    mejor = {"home_ml": None, "away_ml": None, "total_line": None, "over_price": None, "under_price": None}
+    
+    for region in regiones:
+        try:
+            url = "https://api.the-odds-api.com/v4/sports/baseball_mlb/odds"
+            params = {
+                "apiKey": ODDS_API_KEY,
+                "regions": region,
+                "markets": "h2h,totals",
+                "oddsFormat": "american"
+            }
+            data = safe_get(url, params=params)
+            
+            if not isinstance(data, list):
+                continue
+                
+            away_norm = normalizar_nombre_equipo_odds(away_team)
+            home_norm = normalizar_nombre_equipo_odds(home_team)
+            
+            for event in data:
+                home_name = event.get("home_team", "")
+                teams = event.get("teams", [])
+                away_name = teams[0] if len(teams) > 1 and teams[0] != home_name else teams[1] if len(teams) > 1 else ""
+                
+                if normalizar_nombre_equipo_odds(home_name) == home_norm and normalizar_nombre_equipo_odds(away_name) == away_norm:
+                    for book in event.get("bookmakers", []):
+                        for market in book.get("markets", []):
+                            if market.get("key") == "h2h":
+                                for outcome in market.get("outcomes", []):
+                                    name_norm = normalizar_nombre_equipo_odds(outcome.get("name", ""))
                                     price = outcome.get("price")
-                                    if mejor["home_ml"] is None or price > mejor["home_ml"]:
-                                        mejor["home_ml"] = price
-                                elif normalizar_nombre_equipo_odds(outcome.get("name", "")) == away_norm:
-                                    price = outcome.get("price")
-                                    if mejor["away_ml"] is None or price > mejor["away_ml"]:
-                                        mejor["away_ml"] = price
-                        elif market.get("key") == "totals":
-                            mejor["total_line"] = market.get("outcomes", [])[0].get("point") if market.get("outcomes") else None
-                            for outcome in market.get("outcomes", []):
-                                if outcome.get("name") == "Over":
-                                    price = outcome.get("price")
-                                    if mejor["over_price"] is None or price > mejor["over_price"]:
-                                        mejor["over_price"] = price
-                                elif outcome.get("name") == "Under":
-                                    price = outcome.get("price")
-                                    if mejor["under_price"] is None or price > mejor["under_price"]:
-                                        mejor["under_price"] = price
-                break
-        return mejor if any([mejor["home_ml"], mejor["away_ml"]]) else None
-    except Exception as e:
-        logger.error(f"Error odds: {e}")
-        return None
+                                    if name_norm == home_norm:
+                                        if mejor["home_ml"] is None or price > mejor["home_ml"]:
+                                            mejor["home_ml"] = price
+                                    elif name_norm == away_norm:
+                                        if mejor["away_ml"] is None or price > mejor["away_ml"]:
+                                            mejor["away_ml"] = price
+                            elif market.get("key") == "totals":
+                                mejor["total_line"] = market.get("outcomes", [])[0].get("point") if market.get("outcomes") else None
+                                for outcome in market.get("outcomes", []):
+                                    if outcome.get("name") == "Over":
+                                        price = outcome.get("price")
+                                        if mejor["over_price"] is None or price > mejor["over_price"]:
+                                            mejor["over_price"] = price
+                                    elif outcome.get("name") == "Under":
+                                        price = outcome.get("price")
+                                        if mejor["under_price"] is None or price > mejor["under_price"]:
+                                            mejor["under_price"] = price
+                    break
+        except Exception as e:
+            logger.warning(f"Error en región {region}: {e}")
+            continue
+    
+    # Si no hay odds reales y force_fallback está activado, generar odds simuladas
+    if force_fallback or (not mejor["home_ml"] and not mejor["away_ml"]):
+        logger.info(f"Usando odds simuladas para {away_team} @ {home_team}")
+        return generar_odds_simuladas(away_team, home_team)
+    
+    return mejor if any([mejor["home_ml"], mejor["away_ml"]]) else None
 
+def generar_odds_simuladas(away_team, home_team):
+    """
+    Genera odds simuladas basadas en el rendimiento histórico de los equipos.
+    Esto es SOLO para demostración cuando la API real no responde.
+    """
+    try:
+        standings = obtener_standings()
+        away = standings.get(away_team, {})
+        home = standings.get(home_team, {})
+        
+        # Calcular probabilidad implícita basada en win%
+        away_pct = away.get("win_pct", 0.5)
+        home_pct = home.get("win_pct", 0.5)
+        
+        # Normalizar
+        total = away_pct + home_pct
+        prob_home = home_pct / total if total > 0 else 0.5
+        prob_away = away_pct / total if total > 0 else 0.5
+        
+        # Convertir a cuotas americanas
+        def prob_to_moneyline(prob):
+            if prob >= 0.5:
+                return round(-100 * prob / (1 - prob))
+            else:
+                return round(100 * (1 - prob) / prob)
+        
+        home_ml = prob_to_moneyline(prob_home)
+        away_ml = prob_to_moneyline(prob_away)
+        
+        return {
+            "home_ml": home_ml,
+            "away_ml": away_ml,
+            "total_line": 8.5,
+            "over_price": -110,
+            "under_price": -110,
+            "is_simulated": True  # Marcar como simuladas
+        }
+    except Exception as e:
+        logger.error(f"Error generando odds simuladas: {e}")
+        return None
 # =========================================================
 # KELLY FRACTION
 # =========================================================
