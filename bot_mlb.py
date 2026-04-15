@@ -32,7 +32,7 @@ logger = logging.getLogger("MLB_BOT")
 # =========================================================
 # VERSION
 # =========================================================
-BOT_VERSION = "V7_1_FIXED"
+BOT_VERSION = "V7_2_ANALYTICS"
 
 # =========================================================
 # CONFIG
@@ -80,13 +80,13 @@ def inicializar_csv_resultados():
             writer.writerow([
                 "fecha", "juego", "tipo_apuesta", "pick", "cuota",
                 "prob_modelo", "prob_implicita", "edge", "stake",
-                "grade", "resultado", "profit"
+                "grade", "resultado", "profit", "analisis"
             ])
 
-def registrar_apuesta_en_csv(fecha, juego, tipo, pick, cuota, prob_modelo, prob_impl, edge, stake, grade, resultado, profit):
+def registrar_apuesta_en_csv(fecha, juego, tipo, pick, cuota, prob_modelo, prob_impl, edge, stake, grade, resultado, profit, analisis=""):
     with open(RESULTADOS_CSV, "a", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow([fecha, juego, tipo, pick, cuota, prob_modelo, prob_impl, edge, stake, grade, resultado, profit])
+        writer.writerow([fecha, juego, tipo, pick, cuota, prob_modelo, prob_impl, edge, stake, grade, resultado, profit, analisis])
 
 # =========================================================
 # PARLEYS
@@ -730,6 +730,72 @@ def stake_sugerido_kelly(prob, cuota, bankroll=100, unidad_base=1.0):
     return f"{stake_units:.2f}u" if stake_units > 0 else "Pass"
 
 # =========================================================
+# FUNCIONES DE ANÁLISIS AVANZADO
+# =========================================================
+def generar_analisis_pick(game, pred, standings, away_stats, home_stats, weather, odds_info):
+    """Genera un análisis detallado del pick"""
+    away = standings.get(game["away"], {})
+    home = standings.get(game["home"], {})
+    
+    analisis = []
+    
+    # 1. Análisis de forma reciente
+    away_last10 = away.get("last10_win_pct", 0.5) * 100
+    home_last10 = home.get("last10_win_pct", 0.5) * 100
+    
+    if home_last10 > away_last10 + 15:
+        analisis.append(f"📈 {game['home']} viene mejor (últimos 10: {home_last10:.0f}% vs {away_last10:.0f}%)")
+    elif away_last10 > home_last10 + 15:
+        analisis.append(f"📈 {game['away']} viene mejor (últimos 10: {away_last10:.0f}% vs {home_last10:.0f}%)")
+    
+    # 2. Análisis de local/visitante
+    home_home = home.get("home_win_pct", 0.5) * 100
+    away_away = away.get("away_win_pct", 0.5) * 100
+    
+    if pred["favorite"] == game["home"] and home_home > 55:
+        analisis.append(f"🏠 {game['home']} es fuerte en casa ({home_home:.0f}%)")
+    elif pred["favorite"] == game["away"] and away_away > 55:
+        analisis.append(f"🛣️ {game['away']} rinde bien fuera ({away_away:.0f}%)")
+    
+    # 3. Análisis de pitcheo
+    if away_stats.get("era", 4.20) < 3.50:
+        analisis.append(f"🎯 Pitcher visitante: ERA {away_stats['era']} (excelente)")
+    if home_stats.get("era", 4.20) < 3.50:
+        analisis.append(f"🎯 Pitcher local: ERA {home_stats['era']} (excelente)")
+    
+    # 4. Análisis de clima
+    if weather and weather.get("temp_c"):
+        temp = weather["temp_c"]
+        if temp > 28:
+            analisis.append(f"🌡️ Calor extremo ({temp}°C) - favorece bateo")
+        elif temp < 10:
+            analisis.append(f"❄️ Frío ({temp}°C) - favorece pitcheo")
+    
+    if weather and weather.get("wind_kmh", 0) > 25:
+        analisis.append(f"💨 Viento fuerte ({weather['wind_kmh']} km/h) - puede afectar vuelos")
+    
+    # 5. Valor de la cuota
+    if odds_info and odds_info.get("cuota"):
+        cuota = odds_info["cuota"]
+        if cuota > 150:
+            analisis.append(f"💎 Alto valor: cuota {cuota} para equipo con {pred['confidence_pct']}% de probabilidad")
+        elif cuota > 120:
+            analisis.append(f"📈 Buen valor: cuota {cuota}")
+    
+    # 6. Edge del modelo
+    if odds_info and odds_info.get("edge"):
+        edge = odds_info["edge"]
+        if edge > 8:
+            analisis.append(f"🔥 Edge enorme: {edge}%")
+        elif edge > 5:
+            analisis.append(f"✅ Edge sólido: {edge}%")
+    
+    if not analisis:
+        analisis.append("✅ Pick respaldado por el modelo")
+    
+    return analisis[:2]  # Máximo 2 razones para no saturar
+
+# =========================================================
 # ACTUALIZACIÓN AUTOMÁTICA DE RESULTADOS
 # =========================================================
 def actualizar_resultados_parleys():
@@ -751,7 +817,6 @@ def actualizar_resultados_parleys():
                         if pick == f"{res['winner']} ML":
                             leg["resultado"] = "win"
                         elif "Over" in pick or "Under" in pick:
-                            # Por simplicidad, no calculamos totals automáticamente
                             leg["resultado"] = "unknown"
                         else:
                             leg["resultado"] = "lose"
@@ -779,14 +844,108 @@ def actualizar_resultados_parleys():
                         stake="1u",
                         grade="",
                         resultado=leg["resultado"],
-                        profit=0
+                        profit=0,
+                        analisis=leg.get("analisis", "")
                     )
     if modificado:
         guardar_parleys_diarios(parleys)
         logger.info(f"Resultados actualizados para {ayer}")
 
 # =========================================================
-# COMANDOS DEL BOT (TODOS IMPLEMENTADOS)
+# GENERACIÓN DE DATASET PARA TIKTOK
+# =========================================================
+def generar_dataset_tiktok():
+    model = MLBModel()
+    standings = obtener_standings()
+    games = obtener_juegos_del_dia()
+    data = {
+        "fecha": hoy_str(),
+        "bot_version": BOT_VERSION,
+        "juegos_del_dia": [],
+        "pronosticos": [],
+        "apuestas": {"moneyline_ev": [], "totales_ev": [], "modelo": []},
+        "parley": [],
+        "parley_millonario": []
+    }
+    if not games:
+        return data
+    picks_ml = []
+    picks_totals = []
+    picks_modelo = []
+    candidatos_parley = []
+    candidatos_millonario = []
+    for g in games:
+        try:
+            teams = g.get("teams", {})
+            away = teams.get("away", {}).get("team", {}).get("name")
+            home = teams.get("home", {}).get("team", {}).get("name")
+            if not away or not home:
+                continue
+            matchup_key = normalizar_matchup(away, home)
+            away_p = teams.get("away", {}).get("probablePitcher", {}).get("fullName", "TBD")
+            home_p = teams.get("home", {}).get("probablePitcher", {}).get("fullName", "TBD")
+            away_pid = teams.get("away", {}).get("probablePitcher", {}).get("id")
+            home_pid = teams.get("home", {}).get("probablePitcher", {}).get("id")
+            away_stats = obtener_stats_pitcher_reales(away_pid)
+            home_stats = obtener_stats_pitcher_reales(home_pid)
+            weather = obtener_clima_partido(g)
+            pred = model.obtener_pick(away, home, standings, away_p, home_p, away_stats, home_stats, weather)
+            total_proj = estimar_total_juego(away, home, standings, away_p, home_p, away_stats, home_stats, weather)
+            odds = obtener_mejor_cuota(away, home)
+            picks_modelo.append({"game": f"{away} @ {home}", "matchup_key": matchup_key, "pick": f"{pred['favorite']} ML", "confianza": pred["confidence_pct"], "total_proyectado": total_proj})
+            if odds and not pred["avoid"]:
+                cuota_ml = odds["home_ml"] if pred["favorite"] == home else odds["away_ml"]
+                if cuota_ml:
+                    ev = (pred["prob_favorite"] * (american_to_decimal(cuota_ml)-1)) - (1-pred["prob_favorite"])
+                    if ev > 0.01:
+                        stake = stake_sugerido_kelly(pred["prob_favorite"], cuota_ml)
+                        picks_ml.append({"game": f"{away} @ {home}", "matchup_key": matchup_key, "pick": f"{pred['favorite']} ML", "stake": stake, "ev_pct": round(ev*100,2), "cuota": cuota_ml, "confianza": pred["confidence_pct"]})
+            if odds and odds.get("total_line"):
+                total_pick = elegir_total_pick(total_proj, odds["total_line"])
+                if total_pick:
+                    cuota_total = odds["over_price"] if "Over" in total_pick["pick"] else odds["under_price"]
+                    if cuota_total:
+                        prob_total_model = clamp(0.50 + (total_pick["edge"]*0.06), 0.51, 0.62)
+                        ev_total = (prob_total_model * (american_to_decimal(cuota_total)-1)) - (1-prob_total_model)
+                        if ev_total > 0.01:
+                            stake_total = stake_sugerido_kelly(prob_total_model, cuota_total)
+                            picks_totals.append({"game": f"{away} @ {home}", "matchup_key": matchup_key, "pick": total_pick["pick"], "stake": stake_total, "ev_pct": round(ev_total*100,2), "cuota": cuota_total, "projection": total_proj, "line": odds["total_line"]})
+            if not pred["avoid"] and odds:
+                cuota_ml = odds["home_ml"] if pred["favorite"] == home else odds["away_ml"]
+                if cuota_ml:
+                    candidatos_parley.append({"game": f"{away} @ {home}", "matchup_key": matchup_key, "pick": f"{pred['favorite']} ML", "confidence": pred["confidence_pct"], "cuota": cuota_ml})
+            if odds and odds.get("total_line"):
+                total_pick = elegir_total_pick(total_proj, odds["total_line"])
+                if total_pick:
+                    cuota_total = odds["over_price"] if "Over" in total_pick["pick"] else odds["under_price"]
+                    if cuota_total:
+                        candidatos_millonario.append({"tipo": "TOTAL", "game": f"{away} @ {home}", "matchup_key": matchup_key, "pick": total_pick["pick"], "confidence": pred["confidence_pct"], "cuota": cuota_total, "edge": total_pick["edge"]})
+            if not pred["avoid"] and odds:
+                cuota_ml = odds["home_ml"] if pred["favorite"] == home else odds["away_ml"]
+                if cuota_ml:
+                    candidatos_millonario.append({"tipo": "ML", "game": f"{away} @ {home}", "matchup_key": matchup_key, "pick": f"{pred['favorite']} ML", "confidence": pred["confidence_pct"], "cuota": cuota_ml})
+        except Exception as e:
+            logger.error(f"Error en dataset: {e}")
+            continue
+    picks_ml.sort(key=lambda x: x["ev_pct"], reverse=True)
+    picks_totals.sort(key=lambda x: x["ev_pct"], reverse=True)
+    picks_modelo.sort(key=lambda x: x["confianza"], reverse=True)
+    data["apuestas"]["moneyline_ev"] = picks_ml[:5]
+    data["apuestas"]["totales_ev"] = picks_totals[:5]
+    data["pronosticos"] = picks_modelo[:8]
+    data["parley"] = candidatos_parley[:3]
+    data["parley_millonario"] = candidatos_millonario[:10]
+    return data
+
+def guardar_json_tiktok(data):
+    carpeta = f"exports_tiktok/{hoy_str()}"
+    os.makedirs(carpeta, exist_ok=True)
+    ruta = os.path.join(carpeta, "mlb_contenido.json")
+    guardar_json(ruta, data)
+    return ruta
+
+# =========================================================
+# COMANDOS DEL BOT
 # =========================================================
 def menu_markup():
     markup = InlineKeyboardMarkup(row_width=2)
@@ -797,6 +956,7 @@ def menu_markup():
         InlineKeyboardButton("🎯 Parley", callback_data="cmd_parley"),
         InlineKeyboardButton("💎 Parley Mill.", callback_data="cmd_parley_millonario"),
         InlineKeyboardButton("📊 Pronósticos", callback_data="cmd_pronosticos"),
+        InlineKeyboardButton("🚨 Lesionados", callback_data="cmd_lesionados"),
         InlineKeyboardButton("📈 ROI", callback_data="cmd_roi"),
         InlineKeyboardButton("📦 Exportar JSON", callback_data="cmd_exportar_json"),
         InlineKeyboardButton("📊 Stats Parlays", callback_data="cmd_stats_parlays"),
@@ -813,12 +973,13 @@ def menu_markup():
 @bot.message_handler(commands=["start"])
 def start(message):
     texto = (
-        "⚾ <b>MLB PRO BOT V7</b>\n"
+        "⚾ <b>MLB PRO BOT V7.2</b>\n"
         "━━━━━━━━━━━━━━━━━━\n"
         "Predicciones profesionales con:\n"
         "• Modelo calibrado\n"
         "• Kelly fraction para stakes\n"
-        "• Actualización automática\n"
+        "• Análisis detallado por pick\n"
+        "• Actualización automática\n\n"
         f"🧪 Versión: <b>{BOT_VERSION}</b>\n"
     )
     bot.send_message(message.chat.id, texto, parse_mode="HTML", reply_markup=menu_markup())
@@ -913,23 +1074,14 @@ def apuestas(message):
         standings = obtener_standings()
         games = obtener_juegos_del_dia()
         texto = header("APUESTAS PRO MLB", "💰") + f"📅 {hoy_str()}\n\n"
-
         if not games:
             texto += "❌ No hay juegos programados hoy."
             bot.edit_message_text(texto, msg.chat.id, msg.message_id)
             return
-
-        # Verificar API key
         if not ODDS_API_KEY:
-            texto += "⚠️ <b>API de Odds no configurada</b>. No se pueden calcular EV.\n"
-            texto += "Los picks mostrados son solo del modelo (sin cuotas).\n\n"
-        else:
-            texto += f"✅ API de Odds activa (clave: {ODDS_API_KEY[:4]}...)\n\n"
-
+            texto += "⚠️ <b>API de Odds no configurada</b>. No se pueden calcular EV.\n\n"
         picks_ml = []
         picks_totals = []
-        modelo_picks = []  # Siempre mostrar los mejores picks del modelo aunque no haya odds
-
         for g in games:
             try:
                 teams = g.get("teams", {})
@@ -937,7 +1089,6 @@ def apuestas(message):
                 home = teams.get("home", {}).get("team", {}).get("name")
                 if not away or not home:
                     continue
-
                 away_p = teams.get("away", {}).get("probablePitcher", {}).get("fullName", "TBD")
                 home_p = teams.get("home", {}).get("probablePitcher", {}).get("fullName", "TBD")
                 away_pid = teams.get("away", {}).get("probablePitcher", {}).get("id")
@@ -945,129 +1096,77 @@ def apuestas(message):
                 away_stats = obtener_stats_pitcher_reales(away_pid)
                 home_stats = obtener_stats_pitcher_reales(home_pid)
                 weather = obtener_clima_partido(g)
-
                 pred = model.obtener_pick(away, home, standings, away_p, home_p, away_stats, home_stats, weather)
                 total_proj = estimar_total_juego(away, home, standings, away_p, home_p, away_stats, home_stats, weather)
-
-                # Siempre agregar al modelo (sin odds)
-                modelo_picks.append({
-                    "game": f"{away} @ {home}",
-                    "pick": f"{pred['favorite']} ML",
-                    "confianza": pred["confidence_pct"],
-                    "total_proj": total_proj,
-                    "avoid": pred["avoid"]
-                })
-
-                # Intentar obtener odds
-                odds = None
-                if ODDS_API_KEY:
-                    odds = obtener_mejor_cuota(away, home)
-
+                odds = obtener_mejor_cuota(away, home) if ODDS_API_KEY else None
                 if odds and not pred["avoid"]:
-                    cuota_ml = odds.get("home_ml") if pred["favorite"] == home else odds.get("away_ml")
-                    if cuota_ml and cuota_ml > 0:  # cuota positiva o negativa
-                        prob_impl = moneyline_to_prob(cuota_ml)
-                        if prob_impl:
-                            ev = pred["prob_favorite"] * (american_to_decimal(cuota_ml)-1) - (1-pred["prob_favorite"])
-                            # Umbral reducido a 1% para mostrar más picks
-                            if ev > 0.01:
-                                stake = stake_sugerido_kelly(pred["prob_favorite"], cuota_ml)
-                                picks_ml.append({
-                                    "game": f"{away} @ {home}",
-                                    "pick": f"{pred['favorite']} ML",
-                                    "cuota": cuota_ml,
-                                    "ev": round(ev*100, 2),
-                                    "stake": stake,
-                                    "prob_modelo": round(pred["prob_favorite"]*100, 1)
-                                })
-
-                # Totales
-                if odds and odds.get("total_line") and not pred["avoid"]:
+                    cuota_ml = odds["home_ml"] if pred["favorite"] == home else odds["away_ml"]
+                    if cuota_ml:
+                        ev = (pred["prob_favorite"] * (american_to_decimal(cuota_ml)-1)) - (1-pred["prob_favorite"])
+                        if ev > 0.01:
+                            stake = stake_sugerido_kelly(pred["prob_favorite"], cuota_ml)
+                            picks_ml.append({"game": f"{away} @ {home}", "pick": f"{pred['favorite']} ML", "cuota": cuota_ml, "ev": round(ev*100,2), "stake": stake, "prob_modelo": round(pred["prob_favorite"]*100,1)})
+                if odds and odds.get("total_line"):
                     total_pick = elegir_total_pick(total_proj, odds["total_line"])
                     if total_pick:
-                        cuota_total = odds.get("over_price") if "Over" in total_pick["pick"] else odds.get("under_price")
+                        cuota_total = odds["over_price"] if "Over" in total_pick["pick"] else odds["under_price"]
                         if cuota_total:
                             prob_total_model = clamp(0.50 + (total_pick["edge"]*0.06), 0.51, 0.62)
-                            ev_total = prob_total_model * (american_to_decimal(cuota_total)-1) - (1-prob_total_model)
+                            ev_total = (prob_total_model * (american_to_decimal(cuota_total)-1)) - (1-prob_total_model)
                             if ev_total > 0.01:
                                 stake_total = stake_sugerido_kelly(prob_total_model, cuota_total)
-                                picks_totals.append({
-                                    "game": f"{away} @ {home}",
-                                    "pick": total_pick["pick"],
-                                    "cuota": cuota_total,
-                                    "ev": round(ev_total*100, 2),
-                                    "stake": stake_total,
-                                    "proj": total_proj,
-                                    "line": odds["total_line"]
-                                })
+                                picks_totals.append({"game": f"{away} @ {home}", "pick": total_pick["pick"], "cuota": cuota_total, "ev": round(ev_total*100,2), "stake": stake_total, "proj": total_proj, "line": odds["total_line"]})
             except Exception as e:
-                logger.error(f"Error procesando juego en /apuestas: {e}")
+                logger.error(f"Error en /apuestas: {e}")
                 continue
-
-        # Ordenar y mostrar
         picks_ml.sort(key=lambda x: x["ev"], reverse=True)
         picks_totals.sort(key=lambda x: x["ev"], reverse=True)
-        modelo_picks.sort(key=lambda x: x["confianza"], reverse=True)
-
-        # Mostrar sección Moneyline
         if picks_ml:
             texto += "💰 <b>MONEYLINE CON EV+ (Kelly)</b>\n"
             for p in picks_ml[:5]:
-                texto += card_game(p["game"], [
-                    f"🎯 {p['pick']} @ {p['cuota']}",
-                    f"📈 EV: {p['ev']}% | Stake: {p['stake']}",
-                    f"🧠 Prob modelo: {p['prob_modelo']}%"
-                ])
+                texto += card_game(p["game"], [f"🎯 {p['pick']} @ {p['cuota']}", f"📈 EV: {p['ev']}% | Stake: {p['stake']}", f"🧠 Prob modelo: {p['prob_modelo']}%"])
         else:
-            texto += "💰 <b>MONEYLINE</b>\n"
-            texto += "⚠️ No se encontraron apuestas con EV positivo (>1%).\n"
-            if not ODDS_API_KEY:
-                texto += "   (API de Odds no disponible)\n"
-            texto += "\n"
-
-        # Totales
+            texto += "💰 <b>MONEYLINE</b>\n⚠️ No se encontraron apuestas con EV positivo.\n\n"
         if picks_totals:
             texto += "📊 <b>TOTALES CON EV+</b>\n"
             for p in picks_totals[:5]:
-                texto += card_game(p["game"], [
-                    f"🎯 {p['pick']} @ {p['cuota']}",
-                    f"📈 EV: {p['ev']}% | Stake: {p['stake']}",
-                    f"📊 Proyección: {p['proj']} vs Línea {p['line']}"
-                ])
+                texto += card_game(p["game"], [f"🎯 {p['pick']} @ {p['cuota']}", f"📈 EV: {p['ev']}% | Stake: {p['stake']}", f"📊 Proyección: {p['proj']} vs Línea {p['line']}"])
         else:
-            texto += "📊 <b>TOTALES</b>\n"
-            texto += "⚠️ No se encontraron totals con EV positivo.\n\n"
-
-        # Mostrar mejores picks del modelo (si no hay odds o como referencia)
-        if modelo_picks and not picks_ml and not picks_totals:
-            texto += "🧠 <b>MEJORES PICKS DEL MODELO (sin cuotas)</b>\n"
-            for p in modelo_picks[:5]:
-                texto += card_game(p["game"], [
-                    f"🎯 {p['pick']}",
-                    f"🧠 Confianza: {p['confianza']}%",
-                    f"📊 Total proyectado: {p['total_proj']}"
-                ])
-
+            texto += "📊 <b>TOTALES</b>\n⚠️ No se encontraron totals con EV positivo.\n"
         bot.edit_message_text(texto, msg.chat.id, msg.message_id, parse_mode="HTML")
-
     except Exception as e:
         logger.exception("Error en /apuestas")
-        bot.edit_message_text(f"❌ Error crítico: {str(e)[:200]}", msg.chat.id, msg.message_id)
+        bot.edit_message_text(f"❌ Error: {str(e)[:120]}", msg.chat.id, msg.message_id)
+
 @bot.message_handler(commands=["parley"])
 def parley(message):
-    msg = bot.reply_to(message, "🎯 Generando parley del día...")
+    msg = bot.reply_to(message, "🎯 Analizando juegos para parley de calidad...")
     try:
         existente = buscar_parley_del_dia("parley")
         if existente:
             texto = header("PARLEY DEL DÍA (FIJO)", "🎯") + f"📅 {existente['fecha']}\n\n"
             for leg in existente.get("legs", []):
-                texto += card_game(leg["game"], [f"🎯 Pick: <b>{leg['pick']}</b>", f"🧠 Confianza: {leg.get('confidence', 'N/D')}%"])
+                analisis = leg.get("analisis", "Sin análisis")
+                if isinstance(analisis, list):
+                    analisis = " | ".join(analisis)
+                texto += card_game(leg["game"], [
+                    f"🎯 Pick: <b>{leg['pick']}</b>",
+                    f"🧠 Confianza: {leg.get('confidence', 'N/D')}%",
+                    f"📊 {analisis}"
+                ])
             bot.edit_message_text(texto, msg.chat.id, msg.message_id, parse_mode="HTML")
             return
+
         model = MLBModel()
         standings = obtener_standings()
         games = obtener_juegos_del_dia()
+        
+        if not games:
+            bot.edit_message_text("❌ No hay juegos programados hoy.", msg.chat.id, msg.message_id)
+            return
+
         candidatos = []
+        
         for g in games:
             try:
                 teams = g.get("teams", {})
@@ -1075,71 +1174,157 @@ def parley(message):
                 home = teams.get("home", {}).get("team", {}).get("name")
                 if not away or not home:
                     continue
-                away_p = teams.get("away", {}).get("probablePitcher", {}).get("fullName", "TBD")
-                home_p = teams.get("home", {}).get("probablePitcher", {}).get("fullName", "TBD")
-                away_pid = teams.get("away", {}).get("probablePitcher", {}).get("id")
-                home_pid = teams.get("home", {}).get("probablePitcher", {}).get("id")
+                
+                away_pitcher_obj = teams.get("away", {}).get("probablePitcher", {}) or {}
+                home_pitcher_obj = teams.get("home", {}).get("probablePitcher", {}) or {}
+                away_p = away_pitcher_obj.get("fullName", "TBD")
+                home_p = home_pitcher_obj.get("fullName", "TBD")
+                away_pid = away_pitcher_obj.get("id")
+                home_pid = home_pitcher_obj.get("id")
+                
                 away_stats = obtener_stats_pitcher_reales(away_pid)
                 home_stats = obtener_stats_pitcher_reales(home_pid)
                 weather = obtener_clima_partido(g)
+                
                 pred = model.obtener_pick(away, home, standings, away_p, home_p, away_stats, home_stats, weather)
+                
+                confianza = pred["confidence_pct"]
+                
+                # CRITERIOS DE CALIDAD PARA PARLEY
+                if confianza < 55:
+                    continue
                 if pred["avoid"]:
                     continue
-                odds = obtener_mejor_cuota(away, home)
+                if pred["favorite"] == home:
+                    home_win_pct = standings.get(home, {}).get("home_win_pct", 0.5) * 100
+                    if home_win_pct < 52:
+                        continue
+                fav_team = pred["favorite"]
+                last10_pct = standings.get(fav_team, {}).get("last10_win_pct", 0.5) * 100
+                if last10_pct < 45:
+                    continue
+                
+                odds = obtener_mejor_cuota(away, home) if ODDS_API_KEY else None
+                cuota = "N/D"
+                edge = 0
                 if odds:
-                    cuota = odds["home_ml"] if pred["favorite"] == home else odds["away_ml"]
-                    if cuota:
-                        candidatos.append({"game": f"{away} @ {home}", "pick": f"{pred['favorite']} ML", "confidence": pred["confidence_pct"], "cuota": cuota, "is_home": pred["favorite"] == home})
-            except Exception:
+                    cuota = odds.get("home_ml") if pred["favorite"] == home else odds.get("away_ml")
+                    if cuota and isinstance(cuota, (int, float)):
+                        prob_impl = moneyline_to_prob(cuota)
+                        if prob_impl:
+                            edge = round((pred["prob_favorite"] - prob_impl) * 100, 1)
+                
+                if edge < 3:
+                    continue
+                
+                game_info = {"away": away, "home": home}
+                analisis_lista = generar_analisis_pick(
+                    game_info, pred, standings, away_stats, home_stats, weather,
+                    {"cuota": cuota, "edge": edge} if cuota != "N/D" else None
+                )
+                
+                score = confianza * 0.5 + edge * 3 + last10_pct * 0.2
+                
+                candidatos.append({
+                    "game": f"{away} @ {home}",
+                    "pick": f"{pred['favorite']} ML",
+                    "confidence": confianza,
+                    "cuota": cuota,
+                    "edge": edge,
+                    "is_home": pred["favorite"] == home,
+                    "score": score,
+                    "analisis": " | ".join(analisis_lista)
+                })
+                
+            except Exception as e:
+                logger.error(f"Error en parley: {e}")
                 continue
-        candidatos.sort(key=lambda x: x["confidence"], reverse=True)
-        seleccionados = []
-        home_count = 0
-        for c in candidatos:
-            if len(seleccionados) >= 3:
-                break
-            if c["is_home"] and home_count >= 2:
-                continue
-            seleccionados.append(c)
-            if c["is_home"]:
-                home_count += 1
-        if len(seleccionados) < 3:
-            for c in candidatos:
-                if len(seleccionados) >= 3:
-                    break
-                if c not in seleccionados:
-                    seleccionados.append(c)
-        texto = header("PARLEY DEL DÍA MLB", "🎯") + f"📅 {hoy_str()}\n\n"
-        for p in seleccionados:
-            texto += card_game(p["game"], [f"🎯 Pick: <b>{p['pick']}</b>", f"🧠 Confianza: {p['confidence']}%", f"💵 Cuota: {p['cuota']}"])
-        legs = [{"game": p["game"], "pick": p["pick"], "confidence": p["confidence"]} for p in seleccionados]
+        
+        if len(candidatos) < 2:
+            bot.edit_message_text(
+                "❌ No hay suficientes picks de calidad para el parley de hoy.\n\n"
+                "Criterios exigidos:\n"
+                "• Confianza > 55%\n"
+                "• Edge > 3%\n"
+                "• Sin pitchers TBD\n"
+                "• Buena forma reciente (>45% últimos 10)\n"
+                "• Local fuerte en casa (>52%)\n\n"
+                "Intenta de nuevo mañana o usa /pronosticos para ver picks del modelo.",
+                msg.chat.id, msg.message_id, parse_mode="HTML"
+            )
+            return
+        
+        candidatos.sort(key=lambda x: x["score"], reverse=True)
+        seleccionados = candidatos[:3]
+        
+        texto = header("PARLEY DEL DÍA MLB (ANÁLISIS PREMIUM)", "🎯")
+        texto += f"📅 {hoy_str()}\n\n"
+        texto += "━━━━━━━━━━━━━━━━━━\n"
+        texto += "🎯 <b>PICKS CON VALOR REAL</b>\n"
+        texto += "━━━━━━━━━━━━━━━━━━\n\n"
+        
+        for i, p in enumerate(seleccionados, 1):
+            texto += f"⚾ <b>{p['game']}</b>\n"
+            texto += f"🎯 Pick {i}: <b>{p['pick']}</b>\n"
+            texto += f"🧠 Confianza modelo: <b>{p['confidence']}%</b>\n"
+            texto += f"📈 Edge sobre la cuota: <b>+{p['edge']}%</b>\n"
+            texto += f"💵 Cuota: <b>{p['cuota']}</b>\n"
+            texto += f"📊 Análisis: {p['analisis']}\n"
+            texto += divider() + "\n"
+        
+        cuotas_validas = [p["cuota"] for p in seleccionados if p["cuota"] != "N/D" and isinstance(p["cuota"], (int, float))]
+        if cuotas_validas:
+            import math
+            cuota_combinada = math.prod([(c/100 + 1) if c > 0 else (100/abs(c) + 1) for c in cuotas_validas])
+            cuota_combinada = round(cuota_combinada * 100) / 100
+            texto += f"\n💰 <b>CUOTA COMBINADA ESTIMADA: {cuota_combinada}</b>\n"
+            texto += f"📊 Probabilidad implícita combinada: {round(1/cuota_combinada*100, 1)}%\n"
+        
+        legs = [{"game": p["game"], "pick": p["pick"], "confidence": p["confidence"], "analisis": p["analisis"]} for p in seleccionados]
         registrar_parley_del_dia("parley", legs)
+        
         bot.edit_message_text(texto, msg.chat.id, msg.message_id, parse_mode="HTML")
+        
     except Exception as e:
         logger.exception("Error en /parley")
         bot.edit_message_text(f"❌ Error: {str(e)[:120]}", msg.chat.id, msg.message_id)
 
 @bot.message_handler(commands=["parley_millonario"])
 def parley_millonario(message):
-    msg = bot.reply_to(message, "💎 Generando parley millonario...")
+    msg = bot.reply_to(message, "💎 Construyendo parley millonario con análisis profundo...")
     try:
         existente = buscar_parley_del_dia("parley_millonario")
         if existente:
             texto = header("PARLEY MILLONARIO (FIJO)", "💎") + f"📅 {existente['fecha']}\n\n"
             for leg in existente.get("legs", []):
-                texto += card_game(leg["game"], [f"🔥 Pick: <b>{leg['pick']}</b>", f"🧠 Confianza: {leg.get('confidence', 'N/D')}%"])
+                analisis = leg.get("analisis", "Sin análisis")
+                if isinstance(analisis, list):
+                    analisis = " | ".join(analisis)
+                texto += card_game(leg["game"], [
+                    f"🔥 Pick: <b>{leg['pick']}</b>",
+                    f"🧠 Confianza: {leg.get('confidence', 'N/D')}%",
+                    f"📊 {analisis}"
+                ])
             bot.edit_message_text(texto, msg.chat.id, msg.message_id, parse_mode="HTML")
             return
+        
         parley_normal = buscar_parley_del_dia("parley")
         juegos_bloqueados = set()
         if parley_normal:
             for leg in parley_normal.get("legs", []):
                 juegos_bloqueados.add(leg["game"])
+        
         model = MLBModel()
         standings = obtener_standings()
         games = obtener_juegos_del_dia()
+        
+        if not games:
+            bot.edit_message_text("❌ No hay juegos programados hoy.", msg.chat.id, msg.message_id)
+            return
+        
         candidatos_ml = []
         candidatos_totals = []
+        
         for g in games:
             try:
                 teams = g.get("teams", {})
@@ -1147,58 +1332,165 @@ def parley_millonario(message):
                 home = teams.get("home", {}).get("team", {}).get("name")
                 if not away or not home:
                     continue
+                
                 game_str = f"{away} @ {home}"
                 if game_str in juegos_bloqueados:
                     continue
-                away_p = teams.get("away", {}).get("probablePitcher", {}).get("fullName", "TBD")
-                home_p = teams.get("home", {}).get("probablePitcher", {}).get("fullName", "TBD")
-                away_pid = teams.get("away", {}).get("probablePitcher", {}).get("id")
-                home_pid = teams.get("home", {}).get("probablePitcher", {}).get("id")
+                
+                away_pitcher_obj = teams.get("away", {}).get("probablePitcher", {}) or {}
+                home_pitcher_obj = teams.get("home", {}).get("probablePitcher", {}) or {}
+                away_p = away_pitcher_obj.get("fullName", "TBD")
+                home_p = home_pitcher_obj.get("fullName", "TBD")
+                away_pid = away_pitcher_obj.get("id")
+                home_pid = home_pitcher_obj.get("id")
+                
                 away_stats = obtener_stats_pitcher_reales(away_pid)
                 home_stats = obtener_stats_pitcher_reales(home_pid)
                 weather = obtener_clima_partido(g)
+                
                 pred = model.obtener_pick(away, home, standings, away_p, home_p, away_stats, home_stats, weather)
                 total_proj = estimar_total_juego(away, home, standings, away_p, home_p, away_stats, home_stats, weather)
-                odds = obtener_mejor_cuota(away, home)
-                if odds and not pred["avoid"]:
-                    cuota_ml = odds["home_ml"] if pred["favorite"] == home else odds["away_ml"]
-                    if cuota_ml:
-                        candidatos_ml.append({"game": game_str, "pick": f"{pred['favorite']} ML", "confidence": pred["confidence_pct"], "cuota": cuota_ml, "score": pred["confidence_pct"] + (cuota_ml/100)})
+                
+                confianza = pred["confidence_pct"]
+                if confianza < 50:
+                    continue
+                
+                es_riesgoso = pred["avoid"]
+                
+                odds = obtener_mejor_cuota(away, home) if ODDS_API_KEY else None
+                cuota_ml = "N/D"
+                edge_ml = 0
+                if odds:
+                    cuota_ml = odds.get("home_ml") if pred["favorite"] == home else odds.get("away_ml")
+                    if cuota_ml and isinstance(cuota_ml, (int, float)):
+                        prob_impl = moneyline_to_prob(cuota_ml)
+                        if prob_impl:
+                            edge_ml = round((pred["prob_favorite"] - prob_impl) * 100, 1)
+                
+                if edge_ml < 2 and not es_riesgoso:
+                    continue
+                
+                game_info = {"away": away, "home": home}
+                analisis_lista = generar_analisis_pick(
+                    game_info, pred, standings, away_stats, home_stats, weather,
+                    {"cuota": cuota_ml, "edge": edge_ml} if cuota_ml != "N/D" else None
+                )
+                
+                if es_riesgoso:
+                    analisis_lista.append("⚠️ Pitcher TBD - riesgo elevado")
+                
+                score_ml = confianza * 0.4 + edge_ml * 2.5
+                if es_riesgoso:
+                    score_ml *= 0.7
+                
+                candidatos_ml.append({
+                    "tipo": "ML",
+                    "game": game_str,
+                    "pick": f"{pred['favorite']} ML",
+                    "confidence": confianza,
+                    "cuota": cuota_ml,
+                    "edge": edge_ml,
+                    "score": score_ml,
+                    "analisis": " | ".join(analisis_lista),
+                    "riesgoso": es_riesgoso
+                })
+                
+                # TOTALS
                 if odds and odds.get("total_line"):
                     total_pick = elegir_total_pick(total_proj, odds["total_line"])
-                    if not total_pick:
-                        total_pick = elegir_total_pick_fallback(total_proj)
                     if total_pick:
-                        cuota_total = odds["over_price"] if "Over" in total_pick["pick"] else odds["under_price"]
-                        if cuota_total:
-                            candidatos_totals.append({"game": game_str, "pick": total_pick["pick"], "confidence": pred["confidence_pct"], "cuota": cuota_total, "edge": total_pick["edge"], "score": total_pick["edge"] * 10 + pred["confidence_pct"] * 0.5})
-            except Exception:
+                        cuota_total = odds.get("over_price") if "Over" in total_pick["pick"] else odds.get("under_price")
+                        if cuota_total and isinstance(cuota_total, (int, float)):
+                            prob_total_model = clamp(0.50 + (total_pick["edge"]*0.06), 0.51, 0.62)
+                            prob_impl_total = moneyline_to_prob(cuota_total)
+                            if prob_impl_total:
+                                ev_total = prob_total_model - prob_impl_total
+                                if ev_total > 0.02:
+                                    analisis_total = f"📊 Proyección {total_proj} vs línea {odds['total_line']} | Edge {total_pick['edge']}"
+                                    score_total = total_pick["edge"] * 4 + confianza * 0.2
+                                    candidatos_totals.append({
+                                        "tipo": "TOTAL",
+                                        "game": game_str,
+                                        "pick": total_pick["pick"],
+                                        "confidence": confianza,
+                                        "cuota": cuota_total,
+                                        "edge": total_pick["edge"],
+                                        "score": score_total,
+                                        "analisis": analisis_total,
+                                        "proj": total_proj,
+                                        "line": odds["total_line"]
+                                    })
+                
+            except Exception as e:
+                logger.error(f"Error en parley millonario: {e}")
                 continue
+        
+        if len(candidatos_ml) < 2 and len(candidatos_totals) < 2:
+            bot.edit_message_text(
+                "❌ No hay suficientes picks de calidad para el parley millonario.\n\n"
+                "Criterios:\n"
+                "• ML: confianza > 50%, edge > 2%\n"
+                "• Totals: proyección vs línea > 0.45, edge > 2%\n\n"
+                "Usa /pronosticos para ver picks del modelo.",
+                msg.chat.id, msg.message_id, parse_mode="HTML"
+            )
+            return
+        
         candidatos_ml.sort(key=lambda x: x["score"], reverse=True)
         candidatos_totals.sort(key=lambda x: x["score"], reverse=True)
+        
         seleccionados = []
-        for c in candidatos_totals:
-            if len([x for x in seleccionados if "Total" in x["pick"]]) >= 3:
+        for c in candidatos_totals[:3]:
+            if len(seleccionados) >= 5:
                 break
             seleccionados.append(c)
-        for c in candidatos_ml:
-            if len([x for x in seleccionados if "ML" in x["pick"]]) >= 2:
+        for c in candidatos_ml[:3]:
+            if len(seleccionados) >= 5:
                 break
-            seleccionados.append(c)
+            if c not in seleccionados:
+                seleccionados.append(c)
         if len(seleccionados) < 5:
-            mezcla = candidatos_totals + candidatos_ml
-            mezcla.sort(key=lambda x: x["score"], reverse=True)
-            for c in mezcla:
+            resto = [c for c in candidatos_ml + candidatos_totals if c not in seleccionados]
+            resto.sort(key=lambda x: x["score"], reverse=True)
+            for c in resto:
                 if len(seleccionados) >= 5:
                     break
-                if c not in seleccionados:
-                    seleccionados.append(c)
-        texto = header("PARLEY MILLONARIO 5 PICKS", "💎") + f"📅 {hoy_str()}\n\n"
-        for p in seleccionados[:5]:
-            texto += card_game(p["game"], [f"🔥 Pick: <b>{p['pick']}</b>", f"🧠 Confianza: {p['confidence']}%", f"💵 Cuota: {p['cuota']}"])
-        legs = [{"game": p["game"], "pick": p["pick"], "confidence": p["confidence"]} for p in seleccionados[:5]]
+                seleccionados.append(c)
+        
+        texto = header("PARLEY MILLONARIO - PICKS CON VALIDACIÓN", "💎")
+        texto += f"📅 {hoy_str()}\n\n"
+        texto += "━━━━━━━━━━━━━━━━━━\n"
+        texto += "🎯 <b>5 PICKS CON MEJOR VALOR</b>\n"
+        texto += "━━━━━━━━━━━━━━━━━━\n\n"
+        
+        for i, p in enumerate(seleccionados[:5], 1):
+            texto += f"⚾ <b>{p['game']}</b>\n"
+            texto += f"🔥 Pick {i}: <b>{p['tipo']} - {p['pick']}</b>\n"
+            texto += f"🧠 Confianza: <b>{p['confidence']}%</b>\n"
+            if p['cuota'] != "N/D":
+                texto += f"💵 Cuota: <b>{p['cuota']}</b>\n"
+            if p.get('edge', 0) > 0:
+                texto += f"📈 Edge: <b>+{p['edge']}%</b>\n"
+            if p.get('proj'):
+                texto += f"📊 Proyección: {p['proj']} vs línea {p['line']}\n"
+            texto += f"📊 Análisis: {p['analisis']}\n"
+            if p.get('riesgoso'):
+                texto += f"⚠️ <i>Pick con riesgo (pitcher TBD)</i>\n"
+            texto += divider() + "\n"
+        
+        cuotas_validas = [p["cuota"] for p in seleccionados[:5] if p["cuota"] != "N/D" and isinstance(p["cuota"], (int, float))]
+        if cuotas_validas:
+            import math
+            cuota_combinada = math.prod([(c/100 + 1) if c > 0 else (100/abs(c) + 1) for c in cuotas_validas])
+            cuota_combinada = round(cuota_combinada * 100) / 100
+            texto += f"\n💰 <b>CUOTA COMBINADA: {cuota_combinada}</b>\n"
+            texto += f"📊 Probabilidad implícita: {round(1/cuota_combinada*100, 1)}%\n"
+        
+        legs = [{"game": p["game"], "pick": p["pick"], "confidence": p["confidence"], "analisis": p["analisis"]} for p in seleccionados[:5]]
         registrar_parley_del_dia("parley_millonario", legs)
+        
         bot.edit_message_text(texto, msg.chat.id, msg.message_id, parse_mode="HTML")
+        
     except Exception as e:
         logger.exception("Error en /parley_millonario")
         bot.edit_message_text(f"❌ Error: {str(e)[:120]}", msg.chat.id, msg.message_id)
@@ -1351,88 +1643,6 @@ def exportar_json(message):
     except Exception as e:
         bot.edit_message_text(f"❌ Error: {e}", msg.chat.id, msg.message_id)
 
-def generar_dataset_tiktok():
-    model = MLBModel()
-    standings = obtener_standings()
-    games = obtener_juegos_del_dia()
-    data = {"fecha": hoy_str(), "bot_version": BOT_VERSION, "juegos_del_dia": [], "pronosticos": [], "apuestas": {"moneyline_ev": [], "totales_ev": [], "modelo": []}, "parley": [], "parley_millonario": []}
-    if not games:
-        return data
-    picks_ml = []
-    picks_totals = []
-    picks_modelo = []
-    candidatos_parley = []
-    candidatos_millonario = []
-    for g in games:
-        try:
-            teams = g.get("teams", {})
-            away = teams.get("away", {}).get("team", {}).get("name")
-            home = teams.get("home", {}).get("team", {}).get("name")
-            if not away or not home:
-                continue
-            matchup_key = normalizar_matchup(away, home)
-            away_p = teams.get("away", {}).get("probablePitcher", {}).get("fullName", "TBD")
-            home_p = teams.get("home", {}).get("probablePitcher", {}).get("fullName", "TBD")
-            away_pid = teams.get("away", {}).get("probablePitcher", {}).get("id")
-            home_pid = teams.get("home", {}).get("probablePitcher", {}).get("id")
-            away_stats = obtener_stats_pitcher_reales(away_pid)
-            home_stats = obtener_stats_pitcher_reales(home_pid)
-            weather = obtener_clima_partido(g)
-            pred = model.obtener_pick(away, home, standings, away_p, home_p, away_stats, home_stats, weather)
-            total_proj = estimar_total_juego(away, home, standings, away_p, home_p, away_stats, home_stats, weather)
-            odds = obtener_mejor_cuota(away, home)
-            picks_modelo.append({"game": f"{away} @ {home}", "matchup_key": matchup_key, "pick": f"{pred['favorite']} ML", "confianza": pred["confidence_pct"], "total_proyectado": total_proj})
-            if odds and not pred["avoid"]:
-                cuota_ml = odds["home_ml"] if pred["favorite"] == home else odds["away_ml"]
-                if cuota_ml:
-                    ev = (pred["prob_favorite"] * (american_to_decimal(cuota_ml)-1)) - (1-pred["prob_favorite"])
-                    if ev > 0.015:
-                        stake = stake_sugerido_kelly(pred["prob_favorite"], cuota_ml)
-                        picks_ml.append({"game": f"{away} @ {home}", "matchup_key": matchup_key, "pick": f"{pred['favorite']} ML", "stake": stake, "ev_pct": round(ev*100,2), "cuota": cuota_ml, "confianza": pred["confidence_pct"]})
-            if odds and odds.get("total_line"):
-                total_pick = elegir_total_pick(total_proj, odds["total_line"])
-                if total_pick:
-                    cuota_total = odds["over_price"] if "Over" in total_pick["pick"] else odds["under_price"]
-                    if cuota_total:
-                        prob_total_model = clamp(0.50 + (total_pick["edge"]*0.06), 0.51, 0.62)
-                        ev_total = (prob_total_model * (american_to_decimal(cuota_total)-1)) - (1-prob_total_model)
-                        if ev_total > 0.015:
-                            stake_total = stake_sugerido_kelly(prob_total_model, cuota_total)
-                            picks_totals.append({"game": f"{away} @ {home}", "matchup_key": matchup_key, "pick": total_pick["pick"], "stake": stake_total, "ev_pct": round(ev_total*100,2), "cuota": cuota_total, "projection": total_proj, "line": odds["total_line"]})
-            if not pred["avoid"] and odds:
-                cuota_ml = odds["home_ml"] if pred["favorite"] == home else odds["away_ml"]
-                if cuota_ml:
-                    candidatos_parley.append({"game": f"{away} @ {home}", "matchup_key": matchup_key, "pick": f"{pred['favorite']} ML", "confidence": pred["confidence_pct"], "cuota": cuota_ml})
-            if odds and odds.get("total_line"):
-                total_pick = elegir_total_pick(total_proj, odds["total_line"])
-                if total_pick:
-                    cuota_total = odds["over_price"] if "Over" in total_pick["pick"] else odds["under_price"]
-                    if cuota_total:
-                        candidatos_millonario.append({"tipo": "TOTAL", "game": f"{away} @ {home}", "matchup_key": matchup_key, "pick": total_pick["pick"], "confidence": pred["confidence_pct"], "cuota": cuota_total, "edge": total_pick["edge"]})
-            if not pred["avoid"] and odds:
-                cuota_ml = odds["home_ml"] if pred["favorite"] == home else odds["away_ml"]
-                if cuota_ml:
-                    candidatos_millonario.append({"tipo": "ML", "game": f"{away} @ {home}", "matchup_key": matchup_key, "pick": f"{pred['favorite']} ML", "confidence": pred["confidence_pct"], "cuota": cuota_ml})
-        except Exception as e:
-            logger.error(f"Error en dataset: {e}")
-            continue
-    picks_ml.sort(key=lambda x: x["ev_pct"], reverse=True)
-    picks_totals.sort(key=lambda x: x["ev_pct"], reverse=True)
-    picks_modelo.sort(key=lambda x: x["confianza"], reverse=True)
-    data["apuestas"]["moneyline_ev"] = picks_ml[:5]
-    data["apuestas"]["totales_ev"] = picks_totals[:5]
-    data["pronosticos"] = picks_modelo[:8]
-    data["parley"] = candidatos_parley[:3]
-    data["parley_millonario"] = candidatos_millonario[:10]
-    return data
-
-def guardar_json_tiktok(data):
-    carpeta = f"exports_tiktok/{hoy_str()}"
-    os.makedirs(carpeta, exist_ok=True)
-    ruta = os.path.join(carpeta, "mlb_contenido.json")
-    guardar_json(ruta, data)
-    return ruta
-
 # =========================================================
 # CALLBACKS
 # =========================================================
@@ -1483,11 +1693,12 @@ def callback_menu(call):
 if __name__ == "__main__":
     logger.info(f"Iniciando bot {BOT_VERSION}")
     inicializar_csv_resultados()
-    # Hilo para actualización automática cada hora
+    
     def auto_update():
         while True:
             time.sleep(3600)
             actualizar_resultados_parleys()
+    
     threading.Thread(target=auto_update, daemon=True).start()
     bot.remove_webhook()
     time.sleep(1)
