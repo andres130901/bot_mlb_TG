@@ -4,7 +4,7 @@ import json
 import math
 import logging
 import time
-import random
+import threading
 from datetime import datetime, date, timedelta
 from functools import lru_cache
 from typing import Dict, List, Optional, Tuple, Any
@@ -20,7 +20,7 @@ except ImportError:
     ZoneInfo = None
 
 # =========================================================
-# LOGGING CONFIG
+# LOGGING
 # =========================================================
 logging.basicConfig(
     level=logging.INFO,
@@ -32,18 +32,16 @@ logger = logging.getLogger("MLB_BOT")
 # =========================================================
 # VERSION
 # =========================================================
-BOT_VERSION = "V7_0_PROFESSIONAL"
+BOT_VERSION = "V7_1_FIXED"
 
 # =========================================================
 # CONFIG
 # =========================================================
 load_dotenv()
-
 TOKEN = os.getenv("TOKEN")
 ODDS_API_KEY = os.getenv("ODDS_API_KEY", "").strip()
-
 if not TOKEN:
-    raise ValueError("Falta TOKEN en tu archivo .env")
+    raise ValueError("Falta TOKEN en .env")
 
 bot = telebot.TeleBot(TOKEN, parse_mode=None)
 
@@ -54,10 +52,9 @@ PARLEYS_DIARIOS_FILE = "parleys_diarios.json"
 CALIBRACION_FILE = "calibracion_pesos.json"
 REQUEST_TIMEOUT = 20
 MAX_RETRIES = 3
-BACKTEST_DAYS = 30  # Días para recalibrar
 
 # =========================================================
-# PERSISTENCIA MEJORADA
+# PERSISTENCIA
 # =========================================================
 def cargar_json(file: str, default=None):
     if not os.path.exists(file):
@@ -92,7 +89,7 @@ def registrar_apuesta_en_csv(fecha, juego, tipo, pick, cuota, prob_modelo, prob_
         writer.writerow([fecha, juego, tipo, pick, cuota, prob_modelo, prob_impl, edge, stake, grade, resultado, profit])
 
 # =========================================================
-# GESTIÓN DE PARLEYS MEJORADA
+# PARLEYS
 # =========================================================
 def cargar_parleys_diarios():
     return cargar_json(PARLEYS_DIARIOS_FILE, [])
@@ -120,13 +117,11 @@ def registrar_parley_del_dia(tipo, legs, fecha=None):
     guardar_parleys_diarios(data)
     return nuevo
 
-def actualizar_estado_parley(fecha, tipo, estado, resultado_detalle=None):
+def actualizar_estado_parley(fecha, tipo, estado):
     data = cargar_parleys_diarios()
     for p in data:
         if p.get("fecha") == fecha and p.get("tipo") == tipo:
             p["estado"] = estado
-            if resultado_detalle:
-                p["resultado_detalle"] = resultado_detalle
             guardar_parleys_diarios(data)
             return True
     return False
@@ -260,200 +255,29 @@ def card_game(title, lines):
     texto += divider() + "\n"
     return texto
 
-# =========================================================
-# MODELO MEJORADO CON PESOS CALIBRABLES
-# =========================================================
-class MLBModel:
-    def __init__(self):
-        self.pesos = self.cargar_pesos()
-        self.ultima_calibracion = None
+def normalizar_matchup(away, home):
+    return f"{away.lower()} @ {home.lower()}"
 
-    def cargar_pesos(self):
-        default = {
-            "diff_win_pct": 2.8,
-            "diff_split": 1.9,
-            "diff_last10": 1.2,
-            "diff_run_diff": 1.6,
-            "diff_streak": 1.0,
-            "diff_runs_scored": 0.9,
-            "diff_runs_allowed": 0.9,
-            "diff_pitcher": 1.8,
-            "intercept": 0.09,
-            "clima_ml": 0.01,
-            "penalizacion_tbd": 0.04
-        }
-        data = cargar_json(CALIBRACION_FILE, default)
-        # Asegurar que todas las claves existen
-        for k, v in default.items():
-            if k not in data:
-                data[k] = v
-        return data
-
-    def guardar_pesos(self):
-        guardar_json(CALIBRACION_FILE, self.pesos)
-
-    def score_pitcher(self, stats):
-        era = stats.get("era", 4.20)
-        whip = stats.get("whip", 1.30)
-        so9 = stats.get("so9", 8.2)
-        ip = stats.get("ip", 0.0)
-        sample_ok = stats.get("sample_ok", False)
-
-        score = 0.0
-        if era <= 2.80:
-            score += 0.32
-        elif era <= 3.40:
-            score += 0.22
-        elif era <= 4.00:
-            score += 0.10
-        elif era > 4.60:
-            score -= 0.14
-
-        if whip <= 1.05:
-            score += 0.20
-        elif whip <= 1.18:
-            score += 0.12
-        elif whip <= 1.30:
-            score += 0.04
-        elif whip > 1.40:
-            score -= 0.10
-
-        if so9 >= 10.5:
-            score += 0.12
-        elif so9 >= 9.0:
-            score += 0.08
-        elif so9 >= 8.0:
-            score += 0.03
-        elif so9 < 6.5:
-            score -= 0.05
-
-        if not sample_ok or ip < 10:
-            score *= 0.75
-        return round(score, 3)
-
-    def ajuste_clima_ml(self, weather):
-        if not weather:
-            return 0.0
-        temp_c = weather.get("temp_c")
-        precip_mm = weather.get("precip_mm")
-        adj = 0.0
-        if precip_mm is not None and precip_mm >= 1.0:
-            adj -= self.pesos["clima_ml"]
-        if temp_c is not None and temp_c <= 8:
-            adj -= self.pesos["clima_ml"]
-        return adj
-
-    def calcular_prob_local(self, away_team, home_team, standings,
-                           away_pitcher="TBD", home_pitcher="TBD",
-                           away_stats=None, home_stats=None, weather=None):
-        away = standings.get(away_team)
-        home = standings.get(home_team)
-        if not away or not home:
-            return 0.50
-
-        diff_win_pct = home["win_pct"] - away["win_pct"]
-        diff_split = home["home_win_pct"] - away["away_win_pct"]
-        diff_last10 = home["last10_win_pct"] - away["last10_win_pct"]
-        diff_run_diff = (home["run_diff"] - away["run_diff"]) / 100.0
-        diff_streak = parse_streak(home["streak"]) - parse_streak(away["streak"])
-        diff_runs_scored = (home.get("runs_scored", 4.5) - away.get("runs_scored", 4.5)) / 10.0
-        diff_runs_allowed = (away.get("runs_allowed", 4.5) - home.get("runs_allowed", 4.5)) / 10.0
-
-        if away_stats is None:
-            away_stats = {"era": 4.20, "whip": 1.30, "so9": 8.2, "ip": 0.0, "sample_ok": False}
-        if home_stats is None:
-            home_stats = {"era": 4.20, "whip": 1.30, "so9": 8.2, "ip": 0.0, "sample_ok": False}
-
-        p_home = self.score_pitcher(home_stats)
-        p_away = self.score_pitcher(away_stats)
-        diff_pitcher = p_home - p_away
-
-        score = 0.0
-        score += diff_win_pct * self.pesos["diff_win_pct"]
-        score += diff_split * self.pesos["diff_split"]
-        score += diff_last10 * self.pesos["diff_last10"]
-        score += diff_run_diff * self.pesos["diff_run_diff"]
-        score += diff_streak * self.pesos["diff_streak"]
-        score += diff_runs_scored * self.pesos["diff_runs_scored"]
-        score += diff_runs_allowed * self.pesos["diff_runs_allowed"]
-        score += diff_pitcher * self.pesos["diff_pitcher"]
-        score += self.pesos["intercept"]
-        score += self.ajuste_clima_ml(weather)
-
-        if away_pitcher == "TBD":
-            score += self.pesos["penalizacion_tbd"]
-        if home_pitcher == "TBD":
-            score -= self.pesos["penalizacion_tbd"]
-
-        prob = logistic(score)
-        if 0.495 <= prob <= 0.505:
-            prob = 0.518 if score >= 0 else 0.482
-        return clamp(prob, 0.32, 0.68)
-
-    def obtener_pick(self, away_team, home_team, standings,
-                    away_pitcher="TBD", home_pitcher="TBD",
-                    away_stats=None, home_stats=None, weather=None):
-        prob_home = self.calcular_prob_local(away_team, home_team, standings,
-                                             away_pitcher, home_pitcher,
-                                             away_stats, home_stats, weather)
-        favorito = home_team if prob_home >= 0.5 else away_team
-        prob_fav = prob_home if favorito == home_team else (1 - prob_home)
-        avoid = away_pitcher == "TBD" or home_pitcher == "TBD"
-        return {
-            "favorite": favorito,
-            "prob_home": prob_home,
-            "prob_favorite": prob_fav,
-            "confidence_pct": round(prob_fav * 100, 1),
-            "confidence_label": confidence_label(prob_fav),
-            "avoid": avoid
-        }
-
-    def recalibrar_con_datos_historicos(self):
-        """Backtesting simple: ajusta pesos para minimizar error logarítmico sobre resultados pasados"""
-        if not os.path.exists(RESULTADOS_CSV):
-            logger.info("No hay datos históricos para recalibrar")
-            return
-        # Aquí iría una optimización real (ej. scipy.optimize). Por simplicidad, no la implementamos.
-        # En su lugar, se puede hacer una recalibración manual periódica.
-        logger.info("Recalibración automática no implementada; se usan pesos por defecto mejorados.")
-        # En una versión real, leerías el CSV, filtrarías apuestas de ML, y optimizarías los pesos.
-        pass
+def filtrar_matchups_unicos(items):
+    vistos = set()
+    filtrados = []
+    for item in items:
+        clave = item.get("matchup_key")
+        if not clave:
+            game = item.get("game", "")
+            if " @ " in game:
+                away, home = game.split(" @ ", 1)
+                clave = normalizar_matchup(away, home)
+            else:
+                clave = game.strip().lower()
+        if clave in vistos:
+            continue
+        vistos.add(clave)
+        filtrados.append(item)
+    return filtrados
 
 # =========================================================
-# GESTIÓN DE BANKROLL (KELLY FRACCIONAL)
-# =========================================================
-def kelly_fraction(prob, american_odds, kelly_fraction=0.25):
-    """
-    Retorna el stake óptimo como fracción del bankroll según Kelly fraccional.
-    prob: probabilidad estimada (0..1)
-    american_odds: cuota americana
-    kelly_fraction: factor de conservadurismo (0.25 = Kelly cuarto)
-    """
-    dec = american_to_decimal(american_odds)
-    if dec is None or prob <= 0 or prob >= 1:
-        return 0.0
-    b = dec - 1
-    p = prob
-    q = 1 - p
-    f = (p * b - q) / b
-    if f < 0:
-        return 0.0
-    return f * kelly_fraction
-
-def stake_sugerido_kelly(prob, cuota, bankroll=100, unidad_base=1.0):
-    """
-    Devuelve stake en unidades (ej. 1.5u) basado en Kelly.
-    bankroll: bankroll total en unidades (por defecto 100u)
-    unidad_base: 1 unidad = bankroll/100
-    """
-    frac = kelly_fraction(prob, cuota)
-    stake_units = frac * bankroll / unidad_base
-    # Redondear a múltiplos de 0.25u
-    stake_units = round(stake_units * 4) / 4
-    return f"{stake_units:.2f}u" if stake_units > 0 else "Pass"
-
-# =========================================================
-# OBTENCIÓN DE DATOS MLB MEJORADA
+# MLB DATA
 # =========================================================
 def temporada_actual():
     return date.today().year
@@ -487,7 +311,7 @@ def obtener_standings():
 
 def obtener_juegos_del_dia():
     url = f"{MLB_BASE}/schedule"
-    params = {"sportId": 1, "date": hoy_str(), "hydrate": "probablePitcher,venue,lineup"}
+    params = {"sportId": 1, "date": hoy_str(), "hydrate": "probablePitcher,venue"}
     data = safe_get(url, params=params)
     dates = data.get("dates", [])
     if not dates:
@@ -495,7 +319,6 @@ def obtener_juegos_del_dia():
     return dates[0].get("games", [])
 
 def obtener_resultados_juegos_fecha(fecha=None):
-    """Obtiene resultados finales de una fecha específica para actualizar apuestas"""
     if fecha is None:
         fecha = hoy_str()
     url = f"{MLB_BASE}/schedule"
@@ -517,11 +340,9 @@ def obtener_resultados_juegos_fecha(fecha=None):
             winner = home if home_score > away_score else away if away_score > home_score else "Tie"
             resultados.append({
                 "game": f"{away} @ {home}",
-                "away": away,
-                "home": home,
+                "winner": winner,
                 "away_score": away_score,
-                "home_score": home_score,
-                "winner": winner
+                "home_score": home_score
             })
     return resultados
 
@@ -555,9 +376,6 @@ def obtener_stats_pitcher_reales(person_id, season=None):
         "sample_ok": ip >= 10
     }
 
-# =========================================================
-# CLIMA MEJORADO
-# =========================================================
 def obtener_clima_partido(game):
     try:
         venue_id = game.get("venue", {}).get("id")
@@ -612,98 +430,131 @@ def obtener_clima_partido(game):
         return {"temp_c": None, "wind_kmh": None, "precip_mm": None}
 
 # =========================================================
-# ODDS API MEJORADA (MEJOR CUOTA)
+# MODELO MEJORADO
 # =========================================================
-def normalizar_nombre_equipo_odds(team_name):
-    mapping = {
-        "Arizona Diamondbacks": "Arizona Diamondbacks",
-        "Atlanta Braves": "Atlanta Braves",
-        "Baltimore Orioles": "Baltimore Orioles",
-        "Boston Red Sox": "Boston Red Sox",
-        "Chicago Cubs": "Chicago Cubs",
-        "Chicago White Sox": "Chicago White Sox",
-        "Cincinnati Reds": "Cincinnati Reds",
-        "Cleveland Guardians": "Cleveland Guardians",
-        "Colorado Rockies": "Colorado Rockies",
-        "Detroit Tigers": "Detroit Tigers",
-        "Houston Astros": "Houston Astros",
-        "Kansas City Royals": "Kansas City Royals",
-        "Los Angeles Angels": "Los Angeles Angels",
-        "Los Angeles Dodgers": "Los Angeles Dodgers",
-        "Miami Marlins": "Miami Marlins",
-        "Milwaukee Brewers": "Milwaukee Brewers",
-        "Minnesota Twins": "Minnesota Twins",
-        "New York Mets": "New York Mets",
-        "New York Yankees": "New York Yankees",
-        "Athletics": "Oakland Athletics",
-        "Philadelphia Phillies": "Philadelphia Phillies",
-        "Pittsburgh Pirates": "Pittsburgh Pirates",
-        "San Diego Padres": "San Diego Padres",
-        "San Francisco Giants": "San Francisco Giants",
-        "Seattle Mariners": "Seattle Mariners",
-        "St. Louis Cardinals": "St Louis Cardinals",
-        "Tampa Bay Rays": "Tampa Bay Rays",
-        "Texas Rangers": "Texas Rangers",
-        "Toronto Blue Jays": "Toronto Blue Jays",
-        "Washington Nationals": "Washington Nationals",
-    }
-    return mapping.get(team_name, team_name)
+class MLBModel:
+    def __init__(self):
+        self.pesos = self.cargar_pesos()
 
-def obtener_mejor_cuota(away_team, home_team):
-    """Obtiene la mejor cuota moneyline y totals entre todos los bookmakers"""
-    if not ODDS_API_KEY:
-        return None
-    try:
-        url = "https://api.the-odds-api.com/v4/sports/baseball_mlb/odds"
-        params = {"apiKey": ODDS_API_KEY, "regions": "us", "markets": "h2h,totals", "oddsFormat": "american"}
-        data = safe_get(url, params=params)
-        if not isinstance(data, list):
-            return None
-        away_norm = normalizar_nombre_equipo_odds(away_team)
-        home_norm = normalizar_nombre_equipo_odds(home_team)
-        mejor = {
-            "home_ml": None,
-            "away_ml": None,
-            "total_line": None,
-            "over_price": None,
-            "under_price": None
+    def cargar_pesos(self):
+        default = {
+            "diff_win_pct": 2.8, "diff_split": 1.9, "diff_last10": 1.2,
+            "diff_run_diff": 1.6, "diff_streak": 1.0, "diff_runs_scored": 0.9,
+            "diff_runs_allowed": 0.9, "diff_pitcher": 1.8, "intercept": 0.09,
+            "clima_ml": 0.01, "penalizacion_tbd": 0.04
         }
-        for event in data:
-            home_name = event.get("home_team", "")
-            teams = event.get("teams", [])
-            away_name = teams[0] if len(teams) > 1 and teams[0] != home_name else teams[1] if len(teams) > 1 else ""
-            if home_name == home_norm and away_name == away_norm:
-                for book in event.get("bookmakers", []):
-                    for market in book.get("markets", []):
-                        if market.get("key") == "h2h":
-                            for outcome in market.get("outcomes", []):
-                                if outcome.get("name") == home_name:
-                                    price = outcome.get("price")
-                                    if mejor["home_ml"] is None or price > mejor["home_ml"]:
-                                        mejor["home_ml"] = price
-                                elif outcome.get("name") == away_name:
-                                    price = outcome.get("price")
-                                    if mejor["away_ml"] is None or price > mejor["away_ml"]:
-                                        mejor["away_ml"] = price
-                        elif market.get("key") == "totals":
-                            mejor["total_line"] = market.get("outcomes", [])[0].get("point") if market.get("outcomes") else None
-                            for outcome in market.get("outcomes", []):
-                                if outcome.get("name") == "Over":
-                                    price = outcome.get("price")
-                                    if mejor["over_price"] is None or price > mejor["over_price"]:
-                                        mejor["over_price"] = price
-                                elif outcome.get("name") == "Under":
-                                    price = outcome.get("price")
-                                    if mejor["under_price"] is None or price > mejor["under_price"]:
-                                        mejor["under_price"] = price
-                break
-        return mejor if any([mejor["home_ml"], mejor["away_ml"]]) else None
-    except Exception as e:
-        logger.error(f"Error odds: {e}")
-        return None
+        data = cargar_json(CALIBRACION_FILE, default)
+        for k, v in default.items():
+            if k not in data:
+                data[k] = v
+        return data
+
+    def score_pitcher(self, stats):
+        era = stats.get("era", 4.20)
+        whip = stats.get("whip", 1.30)
+        so9 = stats.get("so9", 8.2)
+        ip = stats.get("ip", 0.0)
+        sample_ok = stats.get("sample_ok", False)
+        score = 0.0
+        if era <= 2.80:
+            score += 0.32
+        elif era <= 3.40:
+            score += 0.22
+        elif era <= 4.00:
+            score += 0.10
+        elif era > 4.60:
+            score -= 0.14
+        if whip <= 1.05:
+            score += 0.20
+        elif whip <= 1.18:
+            score += 0.12
+        elif whip <= 1.30:
+            score += 0.04
+        elif whip > 1.40:
+            score -= 0.10
+        if so9 >= 10.5:
+            score += 0.12
+        elif so9 >= 9.0:
+            score += 0.08
+        elif so9 >= 8.0:
+            score += 0.03
+        elif so9 < 6.5:
+            score -= 0.05
+        if not sample_ok or ip < 10:
+            score *= 0.75
+        return round(score, 3)
+
+    def ajuste_clima_ml(self, weather):
+        if not weather:
+            return 0.0
+        adj = 0.0
+        if weather.get("precip_mm") is not None and weather["precip_mm"] >= 1.0:
+            adj -= self.pesos["clima_ml"]
+        if weather.get("temp_c") is not None and weather["temp_c"] <= 8:
+            adj -= self.pesos["clima_ml"]
+        return adj
+
+    def calcular_prob_local(self, away_team, home_team, standings,
+                           away_pitcher="TBD", home_pitcher="TBD",
+                           away_stats=None, home_stats=None, weather=None):
+        away = standings.get(away_team)
+        home = standings.get(home_team)
+        if not away or not home:
+            return 0.50
+        diff_win_pct = home["win_pct"] - away["win_pct"]
+        diff_split = home["home_win_pct"] - away["away_win_pct"]
+        diff_last10 = home["last10_win_pct"] - away["last10_win_pct"]
+        diff_run_diff = (home["run_diff"] - away["run_diff"]) / 100.0
+        diff_streak = parse_streak(home["streak"]) - parse_streak(away["streak"])
+        diff_runs_scored = (home.get("runs_scored", 4.5) - away.get("runs_scored", 4.5)) / 10.0
+        diff_runs_allowed = (away.get("runs_allowed", 4.5) - home.get("runs_allowed", 4.5)) / 10.0
+        if away_stats is None:
+            away_stats = {"era": 4.20, "whip": 1.30, "so9": 8.2, "ip": 0.0, "sample_ok": False}
+        if home_stats is None:
+            home_stats = {"era": 4.20, "whip": 1.30, "so9": 8.2, "ip": 0.0, "sample_ok": False}
+        p_home = self.score_pitcher(home_stats)
+        p_away = self.score_pitcher(away_stats)
+        diff_pitcher = p_home - p_away
+        score = 0.0
+        score += diff_win_pct * self.pesos["diff_win_pct"]
+        score += diff_split * self.pesos["diff_split"]
+        score += diff_last10 * self.pesos["diff_last10"]
+        score += diff_run_diff * self.pesos["diff_run_diff"]
+        score += diff_streak * self.pesos["diff_streak"]
+        score += diff_runs_scored * self.pesos["diff_runs_scored"]
+        score += diff_runs_allowed * self.pesos["diff_runs_allowed"]
+        score += diff_pitcher * self.pesos["diff_pitcher"]
+        score += self.pesos["intercept"]
+        score += self.ajuste_clima_ml(weather)
+        if away_pitcher == "TBD":
+            score += self.pesos["penalizacion_tbd"]
+        if home_pitcher == "TBD":
+            score -= self.pesos["penalizacion_tbd"]
+        prob = logistic(score)
+        if 0.495 <= prob <= 0.505:
+            prob = 0.518 if score >= 0 else 0.482
+        return clamp(prob, 0.32, 0.68)
+
+    def obtener_pick(self, away_team, home_team, standings,
+                    away_pitcher="TBD", home_pitcher="TBD",
+                    away_stats=None, home_stats=None, weather=None):
+        prob_home = self.calcular_prob_local(away_team, home_team, standings,
+                                             away_pitcher, home_pitcher,
+                                             away_stats, home_stats, weather)
+        favorito = home_team if prob_home >= 0.5 else away_team
+        prob_fav = prob_home if favorito == home_team else (1 - prob_home)
+        avoid = away_pitcher == "TBD" or home_pitcher == "TBD"
+        return {
+            "favorite": favorito,
+            "prob_home": prob_home,
+            "prob_favorite": prob_fav,
+            "confidence_pct": round(prob_fav * 100, 1),
+            "confidence_label": confidence_label(prob_fav),
+            "avoid": avoid
+        }
 
 # =========================================================
-# MODELO DE TOTALES MEJORADO
+# TOTALES Y ODDS
 # =========================================================
 def estimar_total_juego(away_team, home_team, standings, away_pitcher="TBD", home_pitcher="TBD",
                        away_stats=None, home_stats=None, weather=None):
@@ -734,7 +585,6 @@ def estimar_total_juego(away_team, home_team, standings, away_pitcher="TBD", hom
     last10_away = away.get("last10_win_pct", 0.5)
     last10_home = home.get("last10_win_pct", 0.5)
     total += ((last10_away + last10_home) - 1.0) * 0.30
-    # Ajuste clima para totals
     if weather:
         temp = weather.get("temp_c")
         wind = weather.get("wind_kmh")
@@ -771,18 +621,118 @@ def elegir_total_pick(total_proyectado, total_line):
     return None
 
 def elegir_total_pick_fallback(total_proyectado):
-    """Fallback cuando no hay línea real"""
     if total_proyectado >= 9.2:
         return {"pick": "Over 8.5", "edge": round(total_proyectado - 8.5, 2), "strength": "Forzado"}
     elif total_proyectado <= 7.8:
         return {"pick": "Under 8.5", "edge": round(8.5 - total_proyectado, 2), "strength": "Forzado"}
     return None
 
+def normalizar_nombre_equipo_odds(team_name):
+    mapping = {
+        "Arizona Diamondbacks": "Arizona Diamondbacks",
+        "Atlanta Braves": "Atlanta Braves",
+        "Baltimore Orioles": "Baltimore Orioles",
+        "Boston Red Sox": "Boston Red Sox",
+        "Chicago Cubs": "Chicago Cubs",
+        "Chicago White Sox": "Chicago White Sox",
+        "Cincinnati Reds": "Cincinnati Reds",
+        "Cleveland Guardians": "Cleveland Guardians",
+        "Colorado Rockies": "Colorado Rockies",
+        "Detroit Tigers": "Detroit Tigers",
+        "Houston Astros": "Houston Astros",
+        "Kansas City Royals": "Kansas City Royals",
+        "Los Angeles Angels": "Los Angeles Angels",
+        "Los Angeles Dodgers": "Los Angeles Dodgers",
+        "Miami Marlins": "Miami Marlins",
+        "Milwaukee Brewers": "Milwaukee Brewers",
+        "Minnesota Twins": "Minnesota Twins",
+        "New York Mets": "New York Mets",
+        "New York Yankees": "New York Yankees",
+        "Athletics": "Oakland Athletics",
+        "Philadelphia Phillies": "Philadelphia Phillies",
+        "Pittsburgh Pirates": "Pittsburgh Pirates",
+        "San Diego Padres": "San Diego Padres",
+        "San Francisco Giants": "San Francisco Giants",
+        "Seattle Mariners": "Seattle Mariners",
+        "St. Louis Cardinals": "St Louis Cardinals",
+        "Tampa Bay Rays": "Tampa Bay Rays",
+        "Texas Rangers": "Texas Rangers",
+        "Toronto Blue Jays": "Toronto Blue Jays",
+        "Washington Nationals": "Washington Nationals",
+    }
+    return mapping.get(team_name, team_name)
+
+def obtener_mejor_cuota(away_team, home_team):
+    if not ODDS_API_KEY:
+        return None
+    try:
+        url = "https://api.the-odds-api.com/v4/sports/baseball_mlb/odds"
+        params = {"apiKey": ODDS_API_KEY, "regions": "us", "markets": "h2h,totals", "oddsFormat": "american"}
+        data = safe_get(url, params=params)
+        if not isinstance(data, list):
+            return None
+        away_norm = normalizar_nombre_equipo_odds(away_team)
+        home_norm = normalizar_nombre_equipo_odds(home_team)
+        mejor = {"home_ml": None, "away_ml": None, "total_line": None, "over_price": None, "under_price": None}
+        for event in data:
+            home_name = event.get("home_team", "")
+            teams = event.get("teams", [])
+            away_name = teams[0] if len(teams) > 1 and teams[0] != home_name else teams[1] if len(teams) > 1 else ""
+            if home_name == home_norm and away_name == away_norm:
+                for book in event.get("bookmakers", []):
+                    for market in book.get("markets", []):
+                        if market.get("key") == "h2h":
+                            for outcome in market.get("outcomes", []):
+                                if outcome.get("name") == home_name:
+                                    price = outcome.get("price")
+                                    if mejor["home_ml"] is None or price > mejor["home_ml"]:
+                                        mejor["home_ml"] = price
+                                elif outcome.get("name") == away_name:
+                                    price = outcome.get("price")
+                                    if mejor["away_ml"] is None or price > mejor["away_ml"]:
+                                        mejor["away_ml"] = price
+                        elif market.get("key") == "totals":
+                            mejor["total_line"] = market.get("outcomes", [])[0].get("point") if market.get("outcomes") else None
+                            for outcome in market.get("outcomes", []):
+                                if outcome.get("name") == "Over":
+                                    price = outcome.get("price")
+                                    if mejor["over_price"] is None or price > mejor["over_price"]:
+                                        mejor["over_price"] = price
+                                elif outcome.get("name") == "Under":
+                                    price = outcome.get("price")
+                                    if mejor["under_price"] is None or price > mejor["under_price"]:
+                                        mejor["under_price"] = price
+                break
+        return mejor if any([mejor["home_ml"], mejor["away_ml"]]) else None
+    except Exception as e:
+        logger.error(f"Error odds: {e}")
+        return None
+
+# =========================================================
+# KELLY FRACTION
+# =========================================================
+def kelly_fraction(prob, american_odds, kelly_fraction=0.25):
+    dec = american_to_decimal(american_odds)
+    if dec is None or prob <= 0 or prob >= 1:
+        return 0.0
+    b = dec - 1
+    p = prob
+    q = 1 - p
+    f = (p * b - q) / b
+    if f < 0:
+        return 0.0
+    return f * kelly_fraction
+
+def stake_sugerido_kelly(prob, cuota, bankroll=100, unidad_base=1.0):
+    frac = kelly_fraction(prob, cuota)
+    stake_units = frac * bankroll / unidad_base
+    stake_units = round(stake_units * 4) / 4
+    return f"{stake_units:.2f}u" if stake_units > 0 else "Pass"
+
 # =========================================================
 # ACTUALIZACIÓN AUTOMÁTICA DE RESULTADOS
 # =========================================================
 def actualizar_resultados_parleys():
-    """Obtiene resultados de juegos de ayer y actualiza parleys pendientes"""
     ayer = (date.today() - timedelta(days=1)).strftime("%Y-%m-%d")
     resultados = obtener_resultados_juegos_fecha(ayer)
     if not resultados:
@@ -796,16 +746,12 @@ def actualizar_resultados_parleys():
             for leg in legs:
                 game = leg.get("game")
                 pick = leg.get("pick")
-                # Determinar si el pick fue ganador
                 for res in resultados:
                     if res["game"] == game:
                         if pick == f"{res['winner']} ML":
                             leg["resultado"] = "win"
-                        elif "Over" in pick:
-                            # Necesitaríamos el total real del juego; por simplicidad, no lo implementamos aquí
-                            # Se podría obtener de linescore.total_runs
-                            leg["resultado"] = "unknown"
-                        elif "Under" in pick:
+                        elif "Over" in pick or "Under" in pick:
+                            # Por simplicidad, no calculamos totals automáticamente
                             leg["resultado"] = "unknown"
                         else:
                             leg["resultado"] = "lose"
@@ -819,176 +765,28 @@ def actualizar_resultados_parleys():
             else:
                 p["estado"] = "fallado"
             modificado = True
-            # Registrar en CSV
             for leg in legs:
-                registrar_apuesta_en_csv(
-                    fecha=ayer,
-                    juego=leg["game"],
-                    tipo="parley",
-                    pick=leg["pick"],
-                    cuota="N/A",
-                    prob_modelo=leg.get("confidence", 0),
-                    prob_impl="N/A",
-                    edge=0,
-                    stake="1u",
-                    grade="",
-                    resultado="win" if leg.get("resultado") == "win" else "lose",
-                    profit=0  # Se calcularía con stake real
-                )
+                if leg.get("resultado") in ["win", "lose"]:
+                    registrar_apuesta_en_csv(
+                        fecha=ayer,
+                        juego=leg["game"],
+                        tipo="parley",
+                        pick=leg["pick"],
+                        cuota="N/A",
+                        prob_modelo=leg.get("confidence", 0),
+                        prob_impl="N/A",
+                        edge=0,
+                        stake="1u",
+                        grade="",
+                        resultado=leg["resultado"],
+                        profit=0
+                    )
     if modificado:
         guardar_parleys_diarios(parleys)
-        logger.info(f"Resultados actualizados para fecha {ayer}")
+        logger.info(f"Resultados actualizados para {ayer}")
 
 # =========================================================
-# GENERACIÓN DE DATASET PARA TIKTOK (MEJORADA)
-# =========================================================
-def generar_dataset_tiktok():
-    model = MLBModel()
-    standings = obtener_standings()
-    games = obtener_juegos_del_dia()
-    data = {
-        "fecha": hoy_str(),
-        "bot_version": BOT_VERSION,
-        "juegos_del_dia": [],
-        "pronosticos": [],
-        "apuestas": {"moneyline_ev": [], "totales_ev": [], "modelo": []},
-        "parley": [],
-        "parley_millonario": []
-    }
-    if not games:
-        return data
-    picks_ml = []
-    picks_totals = []
-    picks_modelo = []
-    candidatos_parley = []
-    candidatos_millonario = []
-    for g in games:
-        try:
-            teams = g.get("teams", {})
-            away_data = teams.get("away", {})
-            home_data = teams.get("home", {})
-            away = away_data.get("team", {}).get("name")
-            home = home_data.get("team", {}).get("name")
-            if not away or not home:
-                continue
-            matchup_key = f"{away.lower()} @ {home.lower()}"
-            away_pitcher_obj = away_data.get("probablePitcher", {}) or {}
-            home_pitcher_obj = home_data.get("probablePitcher", {}) or {}
-            away_p = away_pitcher_obj.get("fullName", "TBD")
-            home_p = home_pitcher_obj.get("fullName", "TBD")
-            away_pid = away_pitcher_obj.get("id")
-            home_pid = home_pitcher_obj.get("id")
-            away_stats = obtener_stats_pitcher_reales(away_pid)
-            home_stats = obtener_stats_pitcher_reales(home_pid)
-            weather = obtener_clima_partido(g)
-            pred = model.obtener_pick(away, home, standings, away_p, home_p, away_stats, home_stats, weather)
-            total_proj = estimar_total_juego(away, home, standings, away_p, home_p, away_stats, home_stats, weather)
-            odds = obtener_mejor_cuota(away, home)
-            # Pronóstico modelo
-            picks_modelo.append({
-                "game": f"{away} @ {home}",
-                "matchup_key": matchup_key,
-                "pick": f"{pred['favorite']} ML",
-                "confianza": pred["confidence_pct"],
-                "total_proyectado": total_proj
-            })
-            # Moneyline con EV
-            if odds and not pred["avoid"]:
-                cuota_ml = odds["home_ml"] if pred["favorite"] == home else odds["away_ml"]
-                if cuota_ml:
-                    prob_impl = moneyline_to_prob(cuota_ml)
-                    ev = (pred["prob_favorite"] * (american_to_decimal(cuota_ml)-1)) - (1-pred["prob_favorite"])
-                    if ev > 0.015:
-                        stake = stake_sugerido_kelly(pred["prob_favorite"], cuota_ml)
-                        picks_ml.append({
-                            "game": f"{away} @ {home}",
-                            "matchup_key": matchup_key,
-                            "pick": f"{pred['favorite']} ML",
-                            "stake": stake,
-                            "ev_pct": round(ev*100,2),
-                            "cuota": cuota_ml,
-                            "confianza": pred["confidence_pct"]
-                        })
-            # Totales con EV
-            if odds and odds.get("total_line"):
-                total_pick = elegir_total_pick(total_proj, odds["total_line"])
-                if total_pick:
-                    cuota_total = odds["over_price"] if "Over" in total_pick["pick"] else odds["under_price"]
-                    if cuota_total:
-                        prob_total_model = clamp(0.50 + (total_pick["edge"]*0.06), 0.51, 0.62)
-                        ev_total = (prob_total_model * (american_to_decimal(cuota_total)-1)) - (1-prob_total_model)
-                        if ev_total > 0.015:
-                            stake_total = stake_sugerido_kelly(prob_total_model, cuota_total)
-                            picks_totals.append({
-                                "game": f"{away} @ {home}",
-                                "matchup_key": matchup_key,
-                                "pick": total_pick["pick"],
-                                "stake": stake_total,
-                                "ev_pct": round(ev_total*100,2),
-                                "cuota": cuota_total,
-                                "projection": total_proj,
-                                "line": odds["total_line"]
-                            })
-            # Candidatos para parley
-            if not pred["avoid"] and odds:
-                cuota_ml = odds["home_ml"] if pred["favorite"] == home else odds["away_ml"]
-                if cuota_ml:
-                    candidatos_parley.append({
-                        "game": f"{away} @ {home}",
-                        "matchup_key": matchup_key,
-                        "pick": f"{pred['favorite']} ML",
-                        "confidence": pred["confidence_pct"],
-                        "cuota": cuota_ml
-                    })
-            # Millonario: ML y totals
-            if not pred["avoid"] and odds:
-                cuota_ml = odds["home_ml"] if pred["favorite"] == home else odds["away_ml"]
-                if cuota_ml:
-                    candidatos_millonario.append({
-                        "tipo": "ML",
-                        "game": f"{away} @ {home}",
-                        "matchup_key": matchup_key,
-                        "pick": f"{pred['favorite']} ML",
-                        "confidence": pred["confidence_pct"],
-                        "cuota": cuota_ml
-                    })
-            if odds and odds.get("total_line"):
-                total_pick = elegir_total_pick(total_proj, odds["total_line"])
-                if total_pick:
-                    cuota_total = odds["over_price"] if "Over" in total_pick["pick"] else odds["under_price"]
-                    if cuota_total:
-                        candidatos_millonario.append({
-                            "tipo": "TOTAL",
-                            "game": f"{away} @ {home}",
-                            "matchup_key": matchup_key,
-                            "pick": total_pick["pick"],
-                            "confidence": pred["confidence_pct"],
-                            "cuota": cuota_total,
-                            "edge": total_pick["edge"]
-                        })
-        except Exception as e:
-            logger.error(f"Error en dataset: {e}")
-            continue
-    # Ordenar y filtrar duplicados
-    picks_ml.sort(key=lambda x: x["ev_pct"], reverse=True)
-    picks_totals.sort(key=lambda x: x["ev_pct"], reverse=True)
-    picks_modelo.sort(key=lambda x: x["confianza"], reverse=True)
-    data["apuestas"]["moneyline_ev"] = picks_ml[:5]
-    data["apuestas"]["totales_ev"] = picks_totals[:5]
-    data["pronosticos"] = picks_modelo[:8]
-    data["parley"] = candidatos_parley[:3]
-    data["parley_millonario"] = candidatos_millonario[:10]
-    return data
-
-def guardar_json_tiktok(data):
-    carpeta = f"exports_tiktok/{hoy_str()}"
-    os.makedirs(carpeta, exist_ok=True)
-    ruta = os.path.join(carpeta, "mlb_contenido.json")
-    guardar_json(ruta, data)
-    return ruta
-
-# =========================================================
-# COMANDOS DEL BOT (MEJORADOS)
+# COMANDOS DEL BOT (TODOS IMPLEMENTADOS)
 # =========================================================
 def menu_markup():
     markup = InlineKeyboardMarkup(row_width=2)
@@ -1020,11 +818,92 @@ def start(message):
         "Predicciones profesionales con:\n"
         "• Modelo calibrado\n"
         "• Kelly fraction para stakes\n"
-        "• Actualización automática de resultados\n"
-        "• Backtesting continuo\n\n"
+        "• Actualización automática\n"
         f"🧪 Versión: <b>{BOT_VERSION}</b>\n"
     )
     bot.send_message(message.chat.id, texto, parse_mode="HTML", reply_markup=menu_markup())
+
+@bot.message_handler(commands=["hoy"])
+def hoy(message):
+    msg = bot.reply_to(message, "📅 Cargando juegos del día...")
+    try:
+        games = obtener_juegos_del_dia()
+        fecha = hoy_str()
+        if not games:
+            bot.edit_message_text(f"📅 JUEGOS DE HOY ({fecha})\n\nNo hay juegos programados hoy.", msg.chat.id, msg.message_id)
+            return
+        juegos_ordenados = []
+        for g in games:
+            teams = g.get("teams", {})
+            away = teams.get("away", {}).get("team", {}).get("name", "TBD")
+            home = teams.get("home", {}).get("team", {}).get("name", "TBD")
+            sa = teams.get("away", {}).get("score", "-")
+            sh = teams.get("home", {}).get("score", "-")
+            status = g.get("status", {}).get("detailedState", "Estado desconocido")
+            game_date = g.get("gameDate", "")
+            try:
+                dt_utc = datetime.fromisoformat(game_date.replace("Z", "+00:00"))
+                if ZoneInfo:
+                    dt_ve = dt_utc.astimezone(ZoneInfo("America/Caracas"))
+                else:
+                    dt_ve = dt_utc - timedelta(hours=4)
+                hora_orden = dt_ve
+                hora_txt = dt_ve.strftime("%I:%M %p")
+            except Exception:
+                hora_orden = None
+                hora_txt = "Hora no disponible"
+            juegos_ordenados.append({
+                "away": away, "home": home, "score_away": sa, "score_home": sh,
+                "status": status, "hora_txt": hora_txt, "hora_orden": hora_orden
+            })
+        juegos_ordenados.sort(key=lambda x: x["hora_orden"] if x["hora_orden"] else datetime.max)
+        texto = header("JUEGOS DE HOY", "📅") + f"🗓️ {fecha} | Hora de Venezuela\n\n"
+        for i, j in enumerate(juegos_ordenados, 1):
+            texto += card_game(f"{i}. {j['away']} @ {j['home']}", [f"🕒 {j['hora_txt']} VET", f"📌 {j['status']}", f"⚾️ Score: {j['score_away']} - {j['score_home']}"])
+        bot.delete_message(msg.chat.id, msg.message_id)
+        responder_largo(message.chat.id, texto, parse_mode="HTML")
+    except Exception as e:
+        bot.edit_message_text(f"❌ Error al cargar juegos: {str(e)[:120]}", msg.chat.id, msg.message_id)
+
+@bot.message_handler(commands=["posiciones"])
+def posiciones(message):
+    msg = bot.reply_to(message, "🏆 Cargando standings...")
+    try:
+        season = temporada_actual()
+        url = f"{MLB_BASE}/standings"
+        params = {"leagueId": "103,104", "season": season, "standingsTypes": "regularSeason"}
+        data = safe_get(url, params=params)
+        records = data.get("records", [])
+        if not records:
+            bot.edit_message_text("❌ No pude cargar los standings.", msg.chat.id, msg.message_id)
+            return
+        bloques = []
+        titulo = f"🏆 <b>STANDINGS MLB {season}</b>\n"
+        for record in records:
+            league_name = record.get("league", {}).get("name", "League")
+            division_name = record.get("division", {}).get("name", "División")
+            if "Spring" in division_name or "Wild Card" in division_name:
+                continue
+            lineas = [f"{league_name} - {division_name}", "", "Team                 W   L   PCT   GB   HOME   AWAY   L10   STRK", "---------------------------------------------------------------"]
+            for team in record.get("teamRecords", []):
+                nombre = team.get("team", {}).get("name", "")
+                wins = team.get("wins", 0)
+                losses = team.get("losses", 0)
+                pct = team.get("pct", "---")
+                gb = str(team.get("gamesBack", "-"))
+                home = f"{team.get('homeWins', 0)}-{team.get('homeLosses', 0)}"
+                away = f"{team.get('awayWins', 0)}-{team.get('awayLosses', 0)}"
+                l10 = f"{team.get('lastTenWins', 0)}-{team.get('lastTenLosses', 0)}"
+                strk = str(team.get("streakCode", "-"))
+                fila = f"{nombre[:20].ljust(20)} {str(wins).rjust(3)} {str(losses).rjust(3)} {str(pct).rjust(5)} {gb.rjust(4)} {home.rjust(6)} {away.rjust(6)} {l10.rjust(5)} {strk.rjust(5)}"
+                lineas.append(fila)
+            bloques.append("<pre>" + "\n".join(lineas) + "</pre>")
+        bot.delete_message(msg.chat.id, msg.message_id)
+        bot.send_message(message.chat.id, titulo, parse_mode="HTML")
+        for bloque in bloques:
+            bot.send_message(message.chat.id, bloque, parse_mode="HTML")
+    except Exception as e:
+        bot.edit_message_text(f"❌ Error: {str(e)[:120]}", msg.chat.id, msg.message_id)
 
 @bot.message_handler(commands=["apuestas"])
 def apuestas(message):
@@ -1047,12 +926,10 @@ def apuestas(message):
                 home = teams.get("home", {}).get("team", {}).get("name")
                 if not away or not home:
                     continue
-                away_pitcher_obj = teams.get("away", {}).get("probablePitcher", {}) or {}
-                home_pitcher_obj = teams.get("home", {}).get("probablePitcher", {}) or {}
-                away_p = away_pitcher_obj.get("fullName", "TBD")
-                home_p = home_pitcher_obj.get("fullName", "TBD")
-                away_pid = away_pitcher_obj.get("id")
-                home_pid = home_pitcher_obj.get("id")
+                away_p = teams.get("away", {}).get("probablePitcher", {}).get("fullName", "TBD")
+                home_p = teams.get("home", {}).get("probablePitcher", {}).get("fullName", "TBD")
+                away_pid = teams.get("away", {}).get("probablePitcher", {}).get("id")
+                home_pid = teams.get("home", {}).get("probablePitcher", {}).get("id")
                 away_stats = obtener_stats_pitcher_reales(away_pid)
                 home_stats = obtener_stats_pitcher_reales(home_pid)
                 weather = obtener_clima_partido(g)
@@ -1065,14 +942,7 @@ def apuestas(message):
                         ev = (pred["prob_favorite"] * (american_to_decimal(cuota_ml)-1)) - (1-pred["prob_favorite"])
                         if ev > 0.015:
                             stake = stake_sugerido_kelly(pred["prob_favorite"], cuota_ml)
-                            picks_ml.append({
-                                "game": f"{away} @ {home}",
-                                "pick": f"{pred['favorite']} ML",
-                                "cuota": cuota_ml,
-                                "ev": round(ev*100,2),
-                                "stake": stake,
-                                "prob_modelo": round(pred["prob_favorite"]*100,1)
-                            })
+                            picks_ml.append({"game": f"{away} @ {home}", "pick": f"{pred['favorite']} ML", "cuota": cuota_ml, "ev": round(ev*100,2), "stake": stake, "prob_modelo": round(pred["prob_favorite"]*100,1)})
                 if odds and odds.get("total_line"):
                     total_pick = elegir_total_pick(total_proj, odds["total_line"])
                     if total_pick:
@@ -1082,17 +952,9 @@ def apuestas(message):
                             ev_total = (prob_total_model * (american_to_decimal(cuota_total)-1)) - (1-prob_total_model)
                             if ev_total > 0.015:
                                 stake_total = stake_sugerido_kelly(prob_total_model, cuota_total)
-                                picks_totals.append({
-                                    "game": f"{away} @ {home}",
-                                    "pick": total_pick["pick"],
-                                    "cuota": cuota_total,
-                                    "ev": round(ev_total*100,2),
-                                    "stake": stake_total,
-                                    "proj": total_proj,
-                                    "line": odds["total_line"]
-                                })
+                                picks_totals.append({"game": f"{away} @ {home}", "pick": total_pick["pick"], "cuota": cuota_total, "ev": round(ev_total*100,2), "stake": stake_total, "proj": total_proj, "line": odds["total_line"]})
             except Exception as e:
-                logger.error(f"Error en /apuestas juego: {e}")
+                logger.error(f"Error en /apuestas: {e}")
                 continue
         picks_ml.sort(key=lambda x: x["ev"], reverse=True)
         picks_totals.sort(key=lambda x: x["ev"], reverse=True)
@@ -1143,16 +1005,9 @@ def parley(message):
                 if odds:
                     cuota = odds["home_ml"] if pred["favorite"] == home else odds["away_ml"]
                     if cuota:
-                        candidatos.append({
-                            "game": f"{away} @ {home}",
-                            "pick": f"{pred['favorite']} ML",
-                            "confidence": pred["confidence_pct"],
-                            "cuota": cuota,
-                            "is_home": pred["favorite"] == home
-                        })
+                        candidatos.append({"game": f"{away} @ {home}", "pick": f"{pred['favorite']} ML", "confidence": pred["confidence_pct"], "cuota": cuota, "is_home": pred["favorite"] == home})
             except Exception:
                 continue
-        # Seleccionar top 3 sin más de 2 locales
         candidatos.sort(key=lambda x: x["confidence"], reverse=True)
         seleccionados = []
         home_count = 0
@@ -1191,7 +1046,6 @@ def parley_millonario(message):
                 texto += card_game(leg["game"], [f"🔥 Pick: <b>{leg['pick']}</b>", f"🧠 Confianza: {leg.get('confidence', 'N/D')}%"])
             bot.edit_message_text(texto, msg.chat.id, msg.message_id, parse_mode="HTML")
             return
-        # Excluir juegos del parley normal
         parley_normal = buscar_parley_del_dia("parley")
         juegos_bloqueados = set()
         if parley_normal:
@@ -1225,13 +1079,7 @@ def parley_millonario(message):
                 if odds and not pred["avoid"]:
                     cuota_ml = odds["home_ml"] if pred["favorite"] == home else odds["away_ml"]
                     if cuota_ml:
-                        candidatos_ml.append({
-                            "game": game_str,
-                            "pick": f"{pred['favorite']} ML",
-                            "confidence": pred["confidence_pct"],
-                            "cuota": cuota_ml,
-                            "score": pred["confidence_pct"] + (cuota_ml/100)  # Heurístico
-                        })
+                        candidatos_ml.append({"game": game_str, "pick": f"{pred['favorite']} ML", "confidence": pred["confidence_pct"], "cuota": cuota_ml, "score": pred["confidence_pct"] + (cuota_ml/100)})
                 if odds and odds.get("total_line"):
                     total_pick = elegir_total_pick(total_proj, odds["total_line"])
                     if not total_pick:
@@ -1239,30 +1087,20 @@ def parley_millonario(message):
                     if total_pick:
                         cuota_total = odds["over_price"] if "Over" in total_pick["pick"] else odds["under_price"]
                         if cuota_total:
-                            candidatos_totals.append({
-                                "game": game_str,
-                                "pick": total_pick["pick"],
-                                "confidence": pred["confidence_pct"],
-                                "cuota": cuota_total,
-                                "edge": total_pick["edge"],
-                                "score": total_pick["edge"] * 10 + pred["confidence_pct"] * 0.5
-                            })
+                            candidatos_totals.append({"game": game_str, "pick": total_pick["pick"], "confidence": pred["confidence_pct"], "cuota": cuota_total, "edge": total_pick["edge"], "score": total_pick["edge"] * 10 + pred["confidence_pct"] * 0.5})
             except Exception:
                 continue
         candidatos_ml.sort(key=lambda x: x["score"], reverse=True)
         candidatos_totals.sort(key=lambda x: x["score"], reverse=True)
         seleccionados = []
-        # Forzar 3 totals
         for c in candidatos_totals:
             if len([x for x in seleccionados if "Total" in x["pick"]]) >= 3:
                 break
             seleccionados.append(c)
-        # Forzar 2 ML
         for c in candidatos_ml:
             if len([x for x in seleccionados if "ML" in x["pick"]]) >= 2:
                 break
             seleccionados.append(c)
-        # Fallback hasta 5
         if len(seleccionados) < 5:
             mezcla = candidatos_totals + candidatos_ml
             mezcla.sort(key=lambda x: x["score"], reverse=True)
@@ -1279,6 +1117,66 @@ def parley_millonario(message):
         bot.edit_message_text(texto, msg.chat.id, msg.message_id, parse_mode="HTML")
     except Exception as e:
         logger.exception("Error en /parley_millonario")
+        bot.edit_message_text(f"❌ Error: {str(e)[:120]}", msg.chat.id, msg.message_id)
+
+@bot.message_handler(commands=["pronosticos"])
+def pronosticos(message):
+    msg = bot.reply_to(message, "📊 Generando pronósticos...")
+    try:
+        model = MLBModel()
+        standings = obtener_standings()
+        games = obtener_juegos_del_dia()
+        texto = header("PRONÓSTICOS DEL MODELO", "📊") + f"📅 {hoy_str()}\n\n"
+        if not games:
+            texto += "No hay juegos hoy."
+            bot.edit_message_text(texto, msg.chat.id, msg.message_id)
+            return
+        picks = []
+        for g in games:
+            teams = g.get("teams", {})
+            away = teams.get("away", {}).get("team", {}).get("name")
+            home = teams.get("home", {}).get("team", {}).get("name")
+            if not away or not home:
+                continue
+            away_p = teams.get("away", {}).get("probablePitcher", {}).get("fullName", "TBD")
+            home_p = teams.get("home", {}).get("probablePitcher", {}).get("fullName", "TBD")
+            away_pid = teams.get("away", {}).get("probablePitcher", {}).get("id")
+            home_pid = teams.get("home", {}).get("probablePitcher", {}).get("id")
+            away_stats = obtener_stats_pitcher_reales(away_pid)
+            home_stats = obtener_stats_pitcher_reales(home_pid)
+            weather = obtener_clima_partido(g)
+            pred = model.obtener_pick(away, home, standings, away_p, home_p, away_stats, home_stats, weather)
+            picks.append({"game": f"{away} @ {home}", "pick": f"{pred['favorite']} ML", "conf": pred["confidence_pct"]})
+        picks.sort(key=lambda x: x["conf"], reverse=True)
+        for p in picks[:8]:
+            texto += card_game(p["game"], [f"🎯 Pick: <b>{p['pick']}</b>", f"🧠 Confianza: <b>{p['conf']}%</b>"])
+        bot.edit_message_text(texto, msg.chat.id, msg.message_id, parse_mode="HTML")
+    except Exception as e:
+        bot.edit_message_text(f"❌ Error: {str(e)[:120]}", msg.chat.id, msg.message_id)
+
+@bot.message_handler(commands=["lesionados"])
+def lesionados(message):
+    msg = bot.reply_to(message, "🚨 Cargando lesionados...")
+    try:
+        url = f"{MLB_BASE}/transactions"
+        params = {"startDate": f"{temporada_actual()}-03-01", "endDate": hoy_str(), "sportId": 1}
+        data = safe_get(url, params=params)
+        transactions = data.get("transactions", [])
+        texto = header("LESIONADOS / IL RECIENTES", "🚨")
+        count = 0
+        for t in transactions:
+            desc = str(t.get("description", ""))
+            lower = desc.lower()
+            if any(x in lower for x in ["injured", "il", "injury", "60-day", "15-day", "10-day", "placed on"]):
+                texto += f"• {desc}\n"
+                count += 1
+                if count >= 15:
+                    break
+        if count == 0:
+            texto += "No encontré movimientos importantes de IL recientemente."
+        bot.delete_message(msg.chat.id, msg.message_id)
+        responder_largo(message.chat.id, texto, parse_mode="HTML")
+    except Exception as e:
         bot.edit_message_text(f"❌ Error: {str(e)[:120]}", msg.chat.id, msg.message_id)
 
 @bot.message_handler(commands=["reset_parley"])
@@ -1369,59 +1267,144 @@ def exportar_json(message):
     except Exception as e:
         bot.edit_message_text(f"❌ Error: {e}", msg.chat.id, msg.message_id)
 
-@bot.message_handler(commands=["hoy", "posiciones", "pronosticos", "lesionados"])
-def comandos_genericos(message):
-    # Implementaciones rápidas (por brevedad, se pueden dejar como estaban)
-    bot.reply_to(message, "Comando disponible. Usa el menú para más opciones.")
+def generar_dataset_tiktok():
+    model = MLBModel()
+    standings = obtener_standings()
+    games = obtener_juegos_del_dia()
+    data = {"fecha": hoy_str(), "bot_version": BOT_VERSION, "juegos_del_dia": [], "pronosticos": [], "apuestas": {"moneyline_ev": [], "totales_ev": [], "modelo": []}, "parley": [], "parley_millonario": []}
+    if not games:
+        return data
+    picks_ml = []
+    picks_totals = []
+    picks_modelo = []
+    candidatos_parley = []
+    candidatos_millonario = []
+    for g in games:
+        try:
+            teams = g.get("teams", {})
+            away = teams.get("away", {}).get("team", {}).get("name")
+            home = teams.get("home", {}).get("team", {}).get("name")
+            if not away or not home:
+                continue
+            matchup_key = normalizar_matchup(away, home)
+            away_p = teams.get("away", {}).get("probablePitcher", {}).get("fullName", "TBD")
+            home_p = teams.get("home", {}).get("probablePitcher", {}).get("fullName", "TBD")
+            away_pid = teams.get("away", {}).get("probablePitcher", {}).get("id")
+            home_pid = teams.get("home", {}).get("probablePitcher", {}).get("id")
+            away_stats = obtener_stats_pitcher_reales(away_pid)
+            home_stats = obtener_stats_pitcher_reales(home_pid)
+            weather = obtener_clima_partido(g)
+            pred = model.obtener_pick(away, home, standings, away_p, home_p, away_stats, home_stats, weather)
+            total_proj = estimar_total_juego(away, home, standings, away_p, home_p, away_stats, home_stats, weather)
+            odds = obtener_mejor_cuota(away, home)
+            picks_modelo.append({"game": f"{away} @ {home}", "matchup_key": matchup_key, "pick": f"{pred['favorite']} ML", "confianza": pred["confidence_pct"], "total_proyectado": total_proj})
+            if odds and not pred["avoid"]:
+                cuota_ml = odds["home_ml"] if pred["favorite"] == home else odds["away_ml"]
+                if cuota_ml:
+                    ev = (pred["prob_favorite"] * (american_to_decimal(cuota_ml)-1)) - (1-pred["prob_favorite"])
+                    if ev > 0.015:
+                        stake = stake_sugerido_kelly(pred["prob_favorite"], cuota_ml)
+                        picks_ml.append({"game": f"{away} @ {home}", "matchup_key": matchup_key, "pick": f"{pred['favorite']} ML", "stake": stake, "ev_pct": round(ev*100,2), "cuota": cuota_ml, "confianza": pred["confidence_pct"]})
+            if odds and odds.get("total_line"):
+                total_pick = elegir_total_pick(total_proj, odds["total_line"])
+                if total_pick:
+                    cuota_total = odds["over_price"] if "Over" in total_pick["pick"] else odds["under_price"]
+                    if cuota_total:
+                        prob_total_model = clamp(0.50 + (total_pick["edge"]*0.06), 0.51, 0.62)
+                        ev_total = (prob_total_model * (american_to_decimal(cuota_total)-1)) - (1-prob_total_model)
+                        if ev_total > 0.015:
+                            stake_total = stake_sugerido_kelly(prob_total_model, cuota_total)
+                            picks_totals.append({"game": f"{away} @ {home}", "matchup_key": matchup_key, "pick": total_pick["pick"], "stake": stake_total, "ev_pct": round(ev_total*100,2), "cuota": cuota_total, "projection": total_proj, "line": odds["total_line"]})
+            if not pred["avoid"] and odds:
+                cuota_ml = odds["home_ml"] if pred["favorite"] == home else odds["away_ml"]
+                if cuota_ml:
+                    candidatos_parley.append({"game": f"{away} @ {home}", "matchup_key": matchup_key, "pick": f"{pred['favorite']} ML", "confidence": pred["confidence_pct"], "cuota": cuota_ml})
+            if odds and odds.get("total_line"):
+                total_pick = elegir_total_pick(total_proj, odds["total_line"])
+                if total_pick:
+                    cuota_total = odds["over_price"] if "Over" in total_pick["pick"] else odds["under_price"]
+                    if cuota_total:
+                        candidatos_millonario.append({"tipo": "TOTAL", "game": f"{away} @ {home}", "matchup_key": matchup_key, "pick": total_pick["pick"], "confidence": pred["confidence_pct"], "cuota": cuota_total, "edge": total_pick["edge"]})
+            if not pred["avoid"] and odds:
+                cuota_ml = odds["home_ml"] if pred["favorite"] == home else odds["away_ml"]
+                if cuota_ml:
+                    candidatos_millonario.append({"tipo": "ML", "game": f"{away} @ {home}", "matchup_key": matchup_key, "pick": f"{pred['favorite']} ML", "confidence": pred["confidence_pct"], "cuota": cuota_ml})
+        except Exception as e:
+            logger.error(f"Error en dataset: {e}")
+            continue
+    picks_ml.sort(key=lambda x: x["ev_pct"], reverse=True)
+    picks_totals.sort(key=lambda x: x["ev_pct"], reverse=True)
+    picks_modelo.sort(key=lambda x: x["confianza"], reverse=True)
+    data["apuestas"]["moneyline_ev"] = picks_ml[:5]
+    data["apuestas"]["totales_ev"] = picks_totals[:5]
+    data["pronosticos"] = picks_modelo[:8]
+    data["parley"] = candidatos_parley[:3]
+    data["parley_millonario"] = candidatos_millonario[:10]
+    return data
 
+def guardar_json_tiktok(data):
+    carpeta = f"exports_tiktok/{hoy_str()}"
+    os.makedirs(carpeta, exist_ok=True)
+    ruta = os.path.join(carpeta, "mlb_contenido.json")
+    guardar_json(ruta, data)
+    return ruta
+
+# =========================================================
+# CALLBACKS
+# =========================================================
 @bot.callback_query_handler(func=lambda call: call.data.startswith("cmd_"))
 def callback_menu(call):
     cmd = call.data.replace("cmd_", "")
-    if cmd == "hoy":
-        bot.send_message(call.message.chat.id, "📅 Función hoy - implementada en el código original")
-    elif cmd == "apuestas":
-        apuestas(call.message)
-    elif cmd == "parley":
-        parley(call.message)
-    elif cmd == "parley_millonario":
-        parley_millonario(call.message)
-    elif cmd == "reset_parley":
-        reset_parley(call.message)
-    elif cmd == "reset_millonario":
-        reset_millonario(call.message)
-    elif cmd == "parley_ganado":
-        parley_ganado(call.message)
-    elif cmd == "parley_fallado":
-        parley_fallado(call.message)
-    elif cmd == "millonario_ganado":
-        millonario_ganado(call.message)
-    elif cmd == "millonario_fallado":
-        millonario_fallado(call.message)
-    elif cmd == "stats_parlays":
-        stats_parlays(call.message)
-    elif cmd == "roi":
-        roi(call.message)
-    elif cmd == "exportar_json":
-        exportar_json(call.message)
-    else:
-        bot.answer_callback_query(call.id, "Opción en desarrollo")
     try:
+        if cmd == "hoy":
+            hoy(call.message)
+        elif cmd == "posiciones":
+            posiciones(call.message)
+        elif cmd == "apuestas":
+            apuestas(call.message)
+        elif cmd == "parley":
+            parley(call.message)
+        elif cmd == "parley_millonario":
+            parley_millonario(call.message)
+        elif cmd == "pronosticos":
+            pronosticos(call.message)
+        elif cmd == "lesionados":
+            lesionados(call.message)
+        elif cmd == "roi":
+            roi(call.message)
+        elif cmd == "exportar_json":
+            exportar_json(call.message)
+        elif cmd == "stats_parlays":
+            stats_parlays(call.message)
+        elif cmd == "parley_ganado":
+            parley_ganado(call.message)
+        elif cmd == "parley_fallado":
+            parley_fallado(call.message)
+        elif cmd == "millonario_ganado":
+            millonario_ganado(call.message)
+        elif cmd == "millonario_fallado":
+            millonario_fallado(call.message)
+        elif cmd == "reset_parley":
+            reset_parley(call.message)
+        elif cmd == "reset_millonario":
+            reset_millonario(call.message)
         bot.answer_callback_query(call.id)
-    except:
-        pass
+    except Exception as e:
+        logger.error(f"Error en callback {cmd}: {e}")
+        bot.answer_callback_query(call.id, "Error al procesar", show_alert=True)
 
 # =========================================================
 # MAIN
 # =========================================================
 if __name__ == "__main__":
     logger.info(f"Iniciando bot {BOT_VERSION}")
-    # Programar actualización automática de resultados cada hora
-    import threading
-    def actualizar_periodicamente():
+    inicializar_csv_resultados()
+    # Hilo para actualización automática cada hora
+    def auto_update():
         while True:
             time.sleep(3600)
             actualizar_resultados_parleys()
-    threading.Thread(target=actualizar_periodicamente, daemon=True).start()
+    threading.Thread(target=auto_update, daemon=True).start()
     bot.remove_webhook()
     time.sleep(1)
     bot.infinity_polling(skip_pending=True, timeout=30)
