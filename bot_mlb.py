@@ -2041,8 +2041,12 @@ def parley_millonario(message):
             bot.edit_message_text(texto, msg.chat.id, msg.message_id, parse_mode="HTML")
             return
 
+        # =========================================
+        # BLOQUEAR TODOS LOS JUEGOS DEL PARLEY DIARIO
+        # =========================================
         parley_diario = buscar_parley_del_dia("parley")
         matchups_bloqueados = set()
+
         if parley_diario:
             for leg in parley_diario.get("legs", []):
                 game = leg.get("game", "")
@@ -2068,6 +2072,9 @@ def parley_millonario(message):
                     continue
 
                 matchup_key = normalizar_matchup(away, home)
+
+                # 🔴 BLOQUEO TOTAL:
+                # Si ese juego ya está en /parley, no entra aquí ni ML ni Total
                 if matchup_key in matchups_bloqueados:
                     continue
 
@@ -2103,9 +2110,9 @@ def parley_millonario(message):
 
                 odds = obtener_odds_completas(away, home)
 
-                # =========================
+                # =========================================
                 # CANDIDATO ML
-                # =========================
+                # =========================================
                 if not pred["avoid"]:
                     cuota_ml = "N/D"
                     edge_ml = 0.0
@@ -2125,7 +2132,11 @@ def parley_millonario(message):
                     if pred["favorite"] == home and pred["confidence_pct"] <= 51.0:
                         penalizacion_local = -3.0
 
-                    score_ml = pred["confidence_pct"] * 0.85 + edge_ml * 0.90 + penalizacion_local
+                    score_ml = (
+                        pred["confidence_pct"] * 0.85
+                        + edge_ml * 0.90
+                        + penalizacion_local
+                    )
 
                     candidatos_ml.append({
                         "tipo": "ML",
@@ -2139,19 +2150,19 @@ def parley_millonario(message):
                         "is_home_pick": pred["favorite"] == home
                     })
 
-                # =========================
-                # CANDIDATO TOTAL (FORZADO)
-                # =========================
+                # =========================================
+                # CANDIDATO TOTAL
+                # =========================================
                 total_pick = None
                 cuota_total = "N/D"
 
-                # 1) si hay línea real, úsala
+                # Si hay línea real de totals, la usamos
                 if odds and isinstance(odds, dict) and odds.get("total_line") is not None:
                     total_pick = elegir_total_pick(total_proj, odds.get("total_line"))
                     if total_pick:
                         cuota_total = odds.get("over_price") if "Over" in total_pick["pick"] else odds.get("under_price")
 
-                # 2) si no hay línea o no salió pick, forzar según proyección
+                # Si no hay línea real o no salió pick, forzamos según proyección
                 if total_pick is None:
                     if total_proj >= 9.2:
                         total_pick = {
@@ -2166,11 +2177,13 @@ def parley_millonario(message):
                             "strength": "Forzado"
                         }
                     else:
-                        # rango medio: usar fallback tradicional
                         total_pick = elegir_total_pick_fallback(total_proj)
 
                 if total_pick:
-                    score_total = abs(total_pick["edge"]) * 3.4 + pred["confidence_pct"] * 0.45
+                    score_total = (
+                        abs(total_pick["edge"]) * 3.4
+                        + pred["confidence_pct"] * 0.45
+                    )
 
                     candidatos_totals.append({
                         "tipo": "TOTAL",
@@ -2190,14 +2203,20 @@ def parley_millonario(message):
         candidatos_ml = filtrar_matchups_unicos(candidatos_ml)
         candidatos_totals = filtrar_matchups_unicos(candidatos_totals)
 
-        candidatos_ml.sort(key=lambda x: (x["score"], x["confidence"], x["edge"]), reverse=True)
-        candidatos_totals.sort(key=lambda x: (x["score"], x["edge"], x["confidence"]), reverse=True)
+        candidatos_ml.sort(
+            key=lambda x: (x["score"], x["confidence"], x["edge"]),
+            reverse=True
+        )
+        candidatos_totals.sort(
+            key=lambda x: (x["score"], x["edge"], x["confidence"]),
+            reverse=True
+        )
 
         seleccionados = []
 
-        # =========================
+        # =========================================
         # 1) FORZAR 3 TOTALS
-        # =========================
+        # =========================================
         for c in candidatos_totals:
             if len([x for x in seleccionados if x["tipo"] == "TOTAL"]) >= 3:
                 break
@@ -2205,9 +2224,9 @@ def parley_millonario(message):
                 continue
             seleccionados.append(c)
 
-        # =========================
+        # =========================================
         # 2) FORZAR 2 ML
-        # =========================
+        # =========================================
         home_ml_count = 0
         for c in candidatos_ml:
             if len([x for x in seleccionados if x["tipo"] == "ML"]) >= 2:
@@ -2215,6 +2234,7 @@ def parley_millonario(message):
             if any(s["matchup_key"] == c["matchup_key"] for s in seleccionados):
                 continue
 
+            # evita 2 locales flojos
             if c["is_home_pick"] and c["confidence"] <= 51.0 and home_ml_count >= 1:
                 continue
 
@@ -2222,9 +2242,9 @@ def parley_millonario(message):
             if c["is_home_pick"]:
                 home_ml_count += 1
 
-        # =========================
+        # =========================================
         # 3) FALLBACK HASTA 5
-        # =========================
+        # =========================================
         if len(seleccionados) < 5:
             mezclados = sorted(
                 candidatos_totals + candidatos_ml,
@@ -2238,7 +2258,7 @@ def parley_millonario(message):
                     continue
                 seleccionados.append(c)
 
-        # totals primero visualmente
+        # mostrar totals primero, luego ML
         seleccionados = sorted(
             seleccionados[:5],
             key=lambda x: (0 if x["tipo"] == "TOTAL" else 1, -x["score"])
@@ -2281,55 +2301,6 @@ def parley_millonario(message):
             msg.chat.id,
             msg.message_id
         )
-
-@bot.message_handler(commands=["pitchers"])
-def pitchers(message):
-    msg = bot.reply_to(message, "🧢 Cargando pitchers...")
-    try:
-        games = obtener_juegos_del_dia()
-        texto = header("PITCHERS DEL DÍA", "🧢")
-        texto += f"📅 {hoy_str()}\n\n"
-
-        if not games:
-            texto += "No hay juegos hoy."
-            bot.edit_message_text(texto, msg.chat.id, msg.message_id)
-            return
-
-        for g in games:
-            teams = g.get("teams", {})
-            away_data = teams.get("away", {})
-            home_data = teams.get("home", {})
-
-            away = away_data.get("team", {}).get("name", "TBD")
-            home = home_data.get("team", {}).get("name", "TBD")
-
-            away_pitcher_obj = away_data.get("probablePitcher", {}) or {}
-            home_pitcher_obj = home_data.get("probablePitcher", {}) or {}
-
-            away_p = away_pitcher_obj.get("fullName", "TBD")
-            home_p = home_pitcher_obj.get("fullName", "TBD")
-
-            away_pid = away_pitcher_obj.get("id")
-            home_pid = home_pitcher_obj.get("id")
-
-            away_stats = obtener_stats_pitcher_reales(away_pid)
-            home_stats = obtener_stats_pitcher_reales(home_pid)
-
-            texto += card_game(
-                f"{away} @ {home}",
-                [
-                    f"🎽 {away_p} vs {home_p}",
-                    f"📉 ERA: {away_stats['era']} vs {home_stats['era']}",
-                    f"🧪 WHIP: {away_stats['whip']} vs {home_stats['whip']}"
-                ]
-            )
-
-        bot.delete_message(msg.chat.id, msg.message_id)
-        responder_largo(message.chat.id, texto, parse_mode="HTML")
-
-    except Exception as e:
-        bot.edit_message_text(f"❌ Error al cargar pitchers: {str(e)[:120]}", msg.chat.id, msg.message_id)
-
 @bot.message_handler(commands=["pronosticos"])
 def pronosticos(message):
     msg = bot.reply_to(message, "📊 Generando pronósticos del modelo...")
