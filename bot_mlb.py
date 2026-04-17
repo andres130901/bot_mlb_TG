@@ -1107,6 +1107,17 @@ def team_key(texto):
     return " ".join(key.split())
 
 
+def score_team_match(a, b):
+    ak = set(team_key(a).split())
+    bk = set(team_key(b).split())
+    if not ak or not bk:
+        return 0
+    inter = len(ak & bk)
+    if inter == 0:
+        return 0
+    return int((inter / max(len(ak), len(bk))) * 100)
+
+
 def obtener_odds_completas(away_team, home_team):
     if not ODDS_API_KEY:
         return None
@@ -1129,6 +1140,9 @@ def obtener_odds_completas(away_team, home_team):
 
         if not isinstance(data, list):
             return None
+        mejor_evento = None
+        mejor_score = -1
+
         for event in data:
             home_name = event.get("home_team", "")
             teams = event.get("teams", [])
@@ -1178,6 +1192,56 @@ def obtener_odds_completas(away_team, home_team):
 
                     return resultado
 
+            score_direct = score_team_match(home_name, home_norm) + score_team_match(
+                away_name, away_norm
+            )
+            score_swap = score_team_match(home_name, away_norm) + score_team_match(
+                away_name, home_norm
+            )
+            score_event = max(score_direct, score_swap)
+            if score_event > mejor_score:
+                mejor_score = score_event
+                mejor_evento = (event, score_swap > score_direct)
+
+        if mejor_evento and mejor_score >= 120:
+            event, usar_swap = mejor_evento
+            home_name = event.get("home_team", "")
+            teams = event.get("teams", [])
+            away_name = [t for t in teams if t != home_name]
+            away_name = away_name[0] if away_name else ""
+            if usar_swap:
+                mapped_home_name = away_name
+                mapped_away_name = home_name
+            else:
+                mapped_home_name = home_name
+                mapped_away_name = away_name
+
+            for book in event.get("bookmakers", []):
+                resultado = {
+                    "bookmaker": book.get("title", "Bookmaker"),
+                    "home_moneyline": None,
+                    "away_moneyline": None,
+                    "total_line": None,
+                    "over_price": None,
+                    "under_price": None,
+                }
+                for market in book.get("markets", []):
+                    key = market.get("key")
+                    if key == "h2h":
+                        for o in market.get("outcomes", []):
+                            if o.get("name") == mapped_home_name:
+                                resultado["home_moneyline"] = o.get("price")
+                            elif o.get("name") == mapped_away_name:
+                                resultado["away_moneyline"] = o.get("price")
+                    elif key == "totals":
+                        for o in market.get("outcomes", []):
+                            if o.get("name") == "Over":
+                                resultado["total_line"] = o.get("point")
+                                resultado["over_price"] = o.get("price")
+                            elif o.get("name") == "Under":
+                                resultado["under_price"] = o.get("price")
+                return resultado
+
         return None
 
     except Exception as e:
@@ -1205,7 +1269,7 @@ def score_pick_ml(analisis):
     if analisis["risk_flags"].get("tbd_pitcher"):
         score -= 7.0
     if analisis["risk_flags"].get("sin_odds_ml"):
-        score -= 4.0
+        score -= 1.4
     if analisis["risk_flags"].get("cuota_extrema_ml"):
         score -= 3.0
     return round(score, 2)
@@ -1221,7 +1285,7 @@ def score_pick_total(analisis):
     if analisis["total_pick"]["strength"] == "Alta":
         score += 2.4
     if analisis["risk_flags"].get("sin_odds_total"):
-        score -= 2.8
+        score -= 1.2
     if analisis["risk_flags"].get("clima_extremo"):
         score -= 1.0
     return round(score, 2)
@@ -1325,6 +1389,7 @@ def analizar_juego(game, standings):
         "tbd_pitcher": pred["avoid"],
         "sin_odds_ml": ml_odds is None,
         "sin_odds_total": total_pick is not None and total_odds is None,
+        "usando_fallback_modelo": ml_odds is None or total_odds is None,
         "cuota_extrema_ml": ml_odds is not None and (ml_odds <= -220 or ml_odds >= 170),
         "clima_extremo": weather.get("wind_kmh") is not None
         and weather.get("wind_kmh") >= 30,
@@ -1376,6 +1441,26 @@ def analizar_juego(game, standings):
     analisis["score_total"] = score_pick_total(analisis)
     analisis["score_agresivo"] = round(
         analisis["score_ml"] * 0.65 + analisis["score_total"] * 0.35, 2
+    )
+    print(
+        "[ANALISIS]",
+        analisis["game"],
+        "ml_odds=",
+        analisis["ml_odds"],
+        "total_odds=",
+        analisis["total_odds"],
+        "conf=",
+        analisis["confidence_pct"],
+        "ml_edge=",
+        analisis["ml_edge_pct"],
+        "ev_ml=",
+        analisis["ev_ml_pct"],
+        "score_ml=",
+        analisis["score_ml"],
+        "score_total=",
+        analisis["score_total"],
+        "score_agresivo=",
+        analisis["score_agresivo"],
     )
     return analisis
 
@@ -1897,64 +1982,53 @@ def parley(message):
         analisis_juegos = obtener_analisis_del_dia()
 
         candidatos_estrictos = []
-        candidatos_flex = []
-        fallback_modelo = []
+        candidatos_fallback = []
         for a in analisis_juegos:
+            motivo = None
             if a["risk_flags"]["tbd_pitcher"]:
-                continue
-            if a["has_valid_ml_odds"]:
+                motivo = "pitcher_tbd"
+            elif a["has_valid_ml_odds"]:
                 if (
-                    a["confidence_pct"] >= 56.0
-                    and a["ml_edge_pct"] >= 2.0
-                    and a["ev_ml_pct"] >= 1.8
-                    and not (a["ml_odds"] <= -255 or a["ml_odds"] >= 175)
+                    a["confidence_pct"] >= 55.5
+                    and a["ml_edge_pct"] >= 1.6
+                    and a["ev_ml_pct"] >= 1.1
+                    and not (a["ml_odds"] <= -275 or a["ml_odds"] >= 190)
                 ):
                     candidatos_estrictos.append(a)
-                elif (
-                    a["confidence_pct"] >= 54.8
-                    and a["ml_edge_pct"] >= 1.4
-                    and a["ev_ml_pct"] >= 1.1
-                    and not (a["ml_odds"] <= -270 or a["ml_odds"] >= 185)
-                ):
-                    candidatos_flex.append(a)
+                else:
+                    motivo = "no_cumple_estricto_odds"
             else:
-                if a["confidence_pct"] >= 56.0 and a["score_ml"] >= 23:
-                    fallback_modelo.append(a)
-                elif a["confidence_pct"] >= 55.0 and a["score_ml"] >= 21.5:
-                    candidatos_flex.append(a)
+                if (
+                    a["confidence_pct"] >= 53.0
+                    and a["score_ml"] >= 20.5
+                    and not a["risk_flags"]["clima_extremo"]
+                ):
+                    candidatos_fallback.append(a)
+                else:
+                    motivo = "no_cumple_fallback_modelo"
+
+            if motivo:
+                print("[PARLEY_DESCARTE]", a["game"], motivo)
 
         candidatos_estrictos = filtrar_matchups_unicos(candidatos_estrictos)
-        candidatos_flex = filtrar_matchups_unicos(candidatos_flex)
-        fallback_modelo = filtrar_matchups_unicos(fallback_modelo)
+        candidatos_fallback = filtrar_matchups_unicos(candidatos_fallback)
         candidatos_estrictos.sort(
-            key=lambda x: (x["score_ml"], x["confidence_pct"]), reverse=True
+            key=lambda x: (x["score_ml"], x["ev_ml_pct"]), reverse=True
         )
-        candidatos_flex.sort(
-            key=lambda x: (x["score_ml"], x["confidence_pct"]), reverse=True
-        )
-        fallback_modelo.sort(
+        candidatos_fallback.sort(
             key=lambda x: (x["score_ml"], x["confidence_pct"]), reverse=True
         )
 
         seleccionados = candidatos_estrictos[:3]
-        if len(seleccionados) < 2:
-            for c in candidatos_flex:
-                if len(seleccionados) >= 3:
-                    break
-                if any(s["matchup_key"] == c["matchup_key"] for s in seleccionados):
-                    continue
-                seleccionados.append(c)
         uso_fallback = False
         if len(seleccionados) < 2:
-            for c in fallback_modelo:
+            for c in candidatos_fallback:
                 if len(seleccionados) >= 3:
                     break
                 if any(s["matchup_key"] == c["matchup_key"] for s in seleccionados):
                     continue
                 seleccionados.append(c)
                 uso_fallback = True
-        if any(p["ml_odds"] is None for p in seleccionados):
-            uso_fallback = True
 
         texto = header("PARLEY DEL DÍA MLB", "🎯")
         texto += f"📅 {hoy_str()}\n\n"
@@ -1963,9 +2037,7 @@ def parley(message):
             texto += "No hay picks conservadores de calidad hoy, incluso tras fallback moderado."
         else:
             if uso_fallback:
-                texto += (
-                    "⚠️ Se usó fallback del modelo por falta de cuotas completas.\n\n"
-                )
+                texto += "⚠️ Se usó fallback moderado del modelo por falta de cuotas suficientes.\n\n"
             for p in seleccionados:
                 texto += card_game(
                     f"{p['away']} @ {p['home']}",
@@ -2049,9 +2121,12 @@ def parley_millonario(message):
         ):
             candidatos = []
             for a in analisis_juegos:
+                motivo = None
                 if a["matchup_key"] in matchups_bloqueados:
+                    motivo = "bloqueado_por_parley"
                     continue
                 if a["risk_flags"]["tbd_pitcher"]:
+                    motivo = "pitcher_tbd"
                     continue
 
                 if (
@@ -2075,8 +2150,8 @@ def parley_millonario(message):
                     )
                 elif (
                     a["ml_odds"] is None
-                    and a["confidence_pct"] >= max(ml_conf - 0.8, 51.0)
-                    and a["score_agresivo"] >= 18.0
+                    and a["confidence_pct"] >= max(ml_conf - 1.0, 52.0)
+                    and a["score_agresivo"] >= 17.8
                     and aceptar_nd
                 ):
                     candidatos.append(
@@ -2092,11 +2167,20 @@ def parley_millonario(message):
                             "is_home_pick": a["is_home_pick"],
                         }
                     )
+                else:
+                    motivo = "ml_no_califica"
 
                 if (
                     a.get("total_pick")
                     and a["total_edge"] >= total_edge
-                    and a["ev_total_pct"] >= total_ev
+                    and (
+                        a["ev_total_pct"] >= total_ev
+                        or (
+                            a["total_odds"] is None
+                            and a["score_total"] >= 15.5
+                            and aceptar_nd
+                        )
+                    )
                 ):
                     cuota_total = (
                         a["total_odds"] if a["total_odds"] is not None else "N/D"
@@ -2115,6 +2199,10 @@ def parley_millonario(message):
                                 "is_home_pick": a["is_home_pick"],
                             }
                         )
+                elif motivo is None:
+                    motivo = "total_no_califica"
+                if motivo and not a["matchup_key"] in matchups_bloqueados:
+                    print("[MILL_DESCARTE]", a["game"], motivo)
             candidatos = filtrar_matchups_unicos(candidatos)
             candidatos.sort(key=lambda x: x["score"], reverse=True)
             return candidatos
@@ -2129,18 +2217,18 @@ def parley_millonario(message):
         )
         candidatos_flex = construir_candidatos(
             ml_conf=52.5,
-            ml_ev=1.5,
-            ml_edge=1.1,
-            total_edge=0.60,
-            total_ev=1.0,
-            aceptar_nd=False,
+            ml_ev=1.0,
+            ml_edge=0.9,
+            total_edge=0.55,
+            total_ev=0.8,
+            aceptar_nd=True,
         )
         candidatos_emergencia = construir_candidatos(
             ml_conf=51.5,
-            ml_ev=0.9,
-            ml_edge=0.7,
-            total_edge=0.50,
-            total_ev=0.6,
+            ml_ev=0.5,
+            ml_edge=0.4,
+            total_edge=0.45,
+            total_ev=0.3,
             aceptar_nd=True,
         )
 
@@ -2181,9 +2269,7 @@ def parley_millonario(message):
             )
         else:
             if uso_fallback_modelo:
-                texto += (
-                    "⚠️ Se usó fallback del modelo por falta de cuotas completas.\n\n"
-                )
+                texto += "⚠️ Se usó fallback agresivo del modelo por falta de cuotas suficientes.\n\n"
             for p in seleccionados:
                 texto += card_game(
                     p["game"],
