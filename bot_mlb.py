@@ -1996,11 +1996,22 @@ def parley(message):
                 ):
                     candidatos_estrictos.append(a)
                 else:
-                    motivo = "no_cumple_estricto_odds"
+                    if (
+                        a["confidence_pct"] >= 53.0
+                        and a["score_ml"] >= 19.5
+                        and not a["risk_flags"]["clima_extremo"]
+                        and not (
+                            a["ml_odds"] is not None
+                            and (a["ml_odds"] <= -320 or a["ml_odds"] >= 220)
+                        )
+                    ):
+                        candidatos_fallback.append(a)
+                    else:
+                        motivo = "no_cumple_estricto_odds"
             else:
                 if (
                     a["confidence_pct"] >= 53.0
-                    and a["score_ml"] >= 20.5
+                    and a["score_ml"] >= 19.5
                     and not a["risk_flags"]["clima_extremo"]
                 ):
                     candidatos_fallback.append(a)
@@ -2018,6 +2029,12 @@ def parley(message):
         candidatos_fallback.sort(
             key=lambda x: (x["score_ml"], x["confidence_pct"]), reverse=True
         )
+        print(
+            "[PARLEY_FASE] estricta=",
+            len(candidatos_estrictos),
+            "fallback=",
+            len(candidatos_fallback),
+        )
 
         seleccionados = candidatos_estrictos[:3]
         uso_fallback = False
@@ -2029,6 +2046,12 @@ def parley(message):
                     continue
                 seleccionados.append(c)
                 uso_fallback = True
+            print(
+                "[PARLEY_FASE] usando_fallback_moderado=",
+                uso_fallback,
+                "seleccionados=",
+                len(seleccionados),
+            )
 
         texto = header("PARLEY DEL DÍA MLB", "🎯")
         texto += f"📅 {hoy_str()}\n\n"
@@ -2208,28 +2231,36 @@ def parley_millonario(message):
             return candidatos
 
         candidatos_estrictos = construir_candidatos(
-            ml_conf=54.0,
-            ml_ev=2.2,
-            ml_edge=1.8,
-            total_edge=0.75,
-            total_ev=1.5,
+            ml_conf=53.5,
+            ml_ev=1.6,
+            ml_edge=1.2,
+            total_edge=0.65,
+            total_ev=1.0,
             aceptar_nd=False,
         )
         candidatos_flex = construir_candidatos(
-            ml_conf=52.5,
-            ml_ev=1.0,
-            ml_edge=0.9,
-            total_edge=0.55,
-            total_ev=0.8,
-            aceptar_nd=True,
-        )
-        candidatos_emergencia = construir_candidatos(
-            ml_conf=51.5,
+            ml_conf=52.0,
             ml_ev=0.5,
-            ml_edge=0.4,
+            ml_edge=0.5,
             total_edge=0.45,
             total_ev=0.3,
             aceptar_nd=True,
+        )
+        candidatos_emergencia = construir_candidatos(
+            ml_conf=51.0,
+            ml_ev=0.0,
+            ml_edge=0.0,
+            total_edge=0.35,
+            total_ev=0.0,
+            aceptar_nd=True,
+        )
+        print(
+            "[MILL_FASE] estricta=",
+            len(candidatos_estrictos),
+            "flex=",
+            len(candidatos_flex),
+            "emergencia=",
+            len(candidatos_emergencia),
         )
 
         seleccionados = []
@@ -2246,11 +2277,11 @@ def parley_millonario(message):
                 if (
                     c["tipo"] == "ML"
                     and c["is_home_pick"]
-                    and c["confidence"] < 55
+                    and c["confidence"] < 54
                     and home_ml_count >= 1
                 ):
                     continue
-                if c["cuota"] == "N/D" and len(seleccionados) >= 3:
+                if c["cuota"] == "N/D" and len(seleccionados) >= 4:
                     continue
                 if c["tipo"] == "ML" and c["is_home_pick"]:
                     home_ml_count += 1
@@ -2259,6 +2290,26 @@ def parley_millonario(message):
                     uso_fallback_modelo = True
             if len(seleccionados) >= 5:
                 break
+
+        if len(seleccionados) < 5:
+            mezcla_extra = (
+                candidatos_estrictos + candidatos_flex + candidatos_emergencia
+            )
+            mezcla_extra.sort(key=lambda x: x["score"], reverse=True)
+            for c in mezcla_extra:
+                if len(seleccionados) >= 5:
+                    break
+                if any(s["matchup_key"] == c["matchup_key"] for s in seleccionados):
+                    continue
+                if (
+                    c["tipo"] == "ML"
+                    and c["is_home_pick"]
+                    and c["confidence"] < 53
+                    and home_ml_count >= 2
+                ):
+                    continue
+                seleccionados.append(c)
+                uso_fallback_modelo = True
 
         texto = header("PARLEY MILLONARIO (ALTO RIESGO CALCULADO)", "💎")
         texto += f"📅 {hoy_str()}\n\n"
@@ -2728,4 +2779,5 @@ bot.infinity_polling(
     long_polling_timeout=30,
     allowed_updates=["message", "callback_query"],
 )
+
 
