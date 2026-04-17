@@ -1856,34 +1856,50 @@ def parley(message):
             return
 
         analisis_juegos = obtener_analisis_del_dia()
-        candidatos = []
-        for a in analisis_juegos:
-            if a["risk_flags"]["tbd_pitcher"]:
-                continue
-            if a["confidence_pct"] < 56.0:
-                continue
-            if a["ml_edge_pct"] < 2.0:
-                continue
-            if a["ev_ml_pct"] < 1.8:
-                continue
-            if a["ml_odds"] is not None and (
-                a["ml_odds"] <= -240 or a["ml_odds"] >= 165
-            ):
-                continue
-            candidatos.append(a)
 
-        candidatos = filtrar_matchups_unicos(candidatos)
-        candidatos.sort(
-            key=lambda x: (x["score_ml"], x["confidence_pct"]), reverse=True
+        def filtrar_parley(items, min_conf, min_edge, min_ev):
+            candidatos = []
+            for a in items:
+                if a["risk_flags"]["tbd_pitcher"]:
+                    continue
+                if a["confidence_pct"] < min_conf:
+                    continue
+                if a["ml_edge_pct"] < min_edge:
+                    continue
+                if a["ev_ml_pct"] < min_ev:
+                    continue
+                if a["ml_odds"] is not None and (
+                    a["ml_odds"] <= -255 or a["ml_odds"] >= 175
+                ):
+                    continue
+                candidatos.append(a)
+            candidatos = filtrar_matchups_unicos(candidatos)
+            candidatos.sort(
+                key=lambda x: (x["score_ml"], x["confidence_pct"]), reverse=True
+            )
+            return candidatos
+
+        candidatos_estrictos = filtrar_parley(
+            analisis_juegos, min_conf=56.0, min_edge=2.0, min_ev=1.8
+        )
+        candidatos_flex = filtrar_parley(
+            analisis_juegos, min_conf=54.8, min_edge=1.4, min_ev=1.1
         )
 
-        seleccionados = candidatos[:3]
+        seleccionados = candidatos_estrictos[:3]
+        if len(seleccionados) < 2:
+            for c in candidatos_flex:
+                if len(seleccionados) >= 3:
+                    break
+                if any(s["matchup_key"] == c["matchup_key"] for s in seleccionados):
+                    continue
+                seleccionados.append(c)
 
         texto = header("PARLEY DEL DÍA MLB", "🎯")
         texto += f"📅 {hoy_str()}\n\n"
 
         if not seleccionados:
-            texto += "No hay picks conservadores de calidad hoy. Prefiero no forzar selecciones."
+            texto += "No hay picks conservadores de calidad hoy, incluso tras fallback moderado."
         else:
             for p in seleccionados:
                 texto += card_game(
@@ -1962,14 +1978,23 @@ def parley_millonario(message):
                     matchups_bloqueados.add(normalizar_matchup(away, home))
 
         analisis_juegos = obtener_analisis_del_dia()
-        candidatos = []
-        for a in analisis_juegos:
-            if a["matchup_key"] in matchups_bloqueados:
-                continue
-            if a["risk_flags"]["tbd_pitcher"]:
-                continue
-            if a["ml_odds"] is not None and a["ml_odds"] != 0:
-                if a["ev_ml_pct"] >= 2.2 and a["confidence_pct"] >= 54:
+
+        def construir_candidatos(
+            ml_conf, ml_ev, ml_edge, total_edge, total_ev, aceptar_nd=False
+        ):
+            candidatos = []
+            for a in analisis_juegos:
+                if a["matchup_key"] in matchups_bloqueados:
+                    continue
+                if a["risk_flags"]["tbd_pitcher"]:
+                    continue
+
+                if (
+                    a["ml_odds"] is not None
+                    and a["confidence_pct"] >= ml_conf
+                    and a["ev_ml_pct"] >= ml_ev
+                    and a["ml_edge_pct"] >= ml_edge
+                ):
                     candidatos.append(
                         {
                             "tipo": "ML",
@@ -1983,52 +2008,88 @@ def parley_millonario(message):
                             "is_home_pick": a["is_home_pick"],
                         }
                     )
-            if (
-                a.get("total_pick")
-                and a["total_edge"] >= 0.75
-                and a["ev_total_pct"] >= 1.5
-            ):
-                candidatos.append(
-                    {
-                        "tipo": "TOTAL",
-                        "game": f"{a['away']} @ {a['home']}",
-                        "matchup_key": a["matchup_key"],
-                        "pick": a["total_pick"]["pick"],
-                        "confidence": a["confidence_pct"],
-                        "edge": a["total_edge"],
-                        "score": a["score_agresivo"] + 1.5,
-                        "cuota": (
-                            a["total_odds"] if a["total_odds"] is not None else "N/D"
-                        ),
-                        "is_home_pick": a["is_home_pick"],
-                    }
-                )
 
-        candidatos = filtrar_matchups_unicos(candidatos)
-        candidatos.sort(key=lambda x: x["score"], reverse=True)
+                if (
+                    a.get("total_pick")
+                    and a["total_edge"] >= total_edge
+                    and a["ev_total_pct"] >= total_ev
+                ):
+                    cuota_total = (
+                        a["total_odds"] if a["total_odds"] is not None else "N/D"
+                    )
+                    if cuota_total != "N/D" or aceptar_nd:
+                        candidatos.append(
+                            {
+                                "tipo": "TOTAL",
+                                "game": f"{a['away']} @ {a['home']}",
+                                "matchup_key": a["matchup_key"],
+                                "pick": a["total_pick"]["pick"],
+                                "confidence": a["confidence_pct"],
+                                "edge": a["total_edge"],
+                                "score": a["score_agresivo"] + 1.3,
+                                "cuota": cuota_total,
+                                "is_home_pick": a["is_home_pick"],
+                            }
+                        )
+            candidatos = filtrar_matchups_unicos(candidatos)
+            candidatos.sort(key=lambda x: x["score"], reverse=True)
+            return candidatos
+
+        candidatos_estrictos = construir_candidatos(
+            ml_conf=54.0,
+            ml_ev=2.2,
+            ml_edge=1.8,
+            total_edge=0.75,
+            total_ev=1.5,
+            aceptar_nd=False,
+        )
+        candidatos_flex = construir_candidatos(
+            ml_conf=52.5,
+            ml_ev=1.5,
+            ml_edge=1.1,
+            total_edge=0.60,
+            total_ev=1.0,
+            aceptar_nd=False,
+        )
+        candidatos_emergencia = construir_candidatos(
+            ml_conf=51.5,
+            ml_ev=0.9,
+            ml_edge=0.7,
+            total_edge=0.50,
+            total_ev=0.6,
+            aceptar_nd=True,
+        )
+
         seleccionados = []
         home_ml_count = 0
-        for c in candidatos:
+        for pool in [candidatos_estrictos, candidatos_flex, candidatos_emergencia]:
+            for c in pool:
+                if len(seleccionados) >= 5:
+                    break
+                if any(s["matchup_key"] == c["matchup_key"] for s in seleccionados):
+                    continue
+                if (
+                    c["tipo"] == "ML"
+                    and c["is_home_pick"]
+                    and c["confidence"] < 55
+                    and home_ml_count >= 1
+                ):
+                    continue
+                if c["cuota"] == "N/D" and len(seleccionados) >= 3:
+                    continue
+                if c["tipo"] == "ML" and c["is_home_pick"]:
+                    home_ml_count += 1
+                seleccionados.append(c)
             if len(seleccionados) >= 5:
                 break
-            if c["cuota"] == "N/D":
-                continue
-            if (
-                c["tipo"] == "ML"
-                and c["is_home_pick"]
-                and c["confidence"] < 56
-                and home_ml_count >= 1
-            ):
-                continue
-            if c["tipo"] == "ML" and c["is_home_pick"]:
-                home_ml_count += 1
-            seleccionados.append(c)
 
         texto = header("PARLEY MILLONARIO (ALTO RIESGO CALCULADO)", "💎")
         texto += f"📅 {hoy_str()}\n\n"
 
         if not seleccionados:
-            texto += "No hay picks agresivos de calidad hoy. Mejor no forzar."
+            texto += (
+                "No hay picks agresivos de calidad hoy, incluso tras fallback flexible."
+            )
         else:
             for p in seleccionados:
                 texto += card_game(
