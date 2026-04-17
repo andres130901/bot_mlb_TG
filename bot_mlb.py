@@ -17,7 +17,7 @@ except ImportError:
 # =========================================================
 # VERSION
 # =========================================================
-BOT_VERSION = "V6_3_TRACKED_EDGE"
+BOT_VERSION = "V6_3333_TRACKED_EDGE"
 
 # =========================================================
 # CONFIG
@@ -1979,105 +1979,156 @@ def parley(message):
             bot.edit_message_text(texto, msg.chat.id, msg.message_id, parse_mode="HTML")
             return
 
-        analisis_juegos = obtener_analisis_del_dia()
+        standings = obtener_standings()
+        games = obtener_juegos_del_dia()
+        candidatos = []
 
-        candidatos_estrictos = []
-        candidatos_fallback = []
-        for a in analisis_juegos:
-            motivo = None
-            if a["risk_flags"]["tbd_pitcher"]:
-                motivo = "pitcher_tbd"
-            elif a["has_valid_ml_odds"]:
-                if (
-                    a["confidence_pct"] >= 55.5
-                    and a["ml_edge_pct"] >= 1.6
-                    and a["ev_ml_pct"] >= 1.1
-                    and not (a["ml_odds"] <= -275 or a["ml_odds"] >= 190)
-                ):
-                    candidatos_estrictos.append(a)
-                else:
+        for g in games:
+            try:
+                teams = g.get("teams", {})
+                away_data = teams.get("away", {})
+                home_data = teams.get("home", {})
+
+                away = away_data.get("team", {}).get("name")
+                home = home_data.get("team", {}).get("name")
+                if not away or not home:
+                    continue
+
+                away_pitcher_obj = away_data.get("probablePitcher", {}) or {}
+                home_pitcher_obj = home_data.get("probablePitcher", {}) or {}
+
+                away_p = away_pitcher_obj.get("fullName", "TBD")
+                home_p = home_pitcher_obj.get("fullName", "TBD")
+
+                away_pid = away_pitcher_obj.get("id")
+                home_pid = home_pitcher_obj.get("id")
+
+                away_stats = obtener_stats_pitcher_reales(away_pid)
+                home_stats = obtener_stats_pitcher_reales(home_pid)
+                weather = obtener_clima_partido(g) or {
+                    "temp_c": None,
+                    "wind_kmh": None,
+                    "precip_mm": None,
+                }
+
+                pred = obtener_pick_juego_pro(
+                    away,
+                    home,
+                    standings,
+                    away_p,
+                    home_p,
+                    away_stats,
+                    home_stats,
+                    weather,
+                )
+
+                if pred["avoid"]:
+                    continue
+
+                odds = obtener_odds_completas(away, home)
+                cuota = "N/D"
+                edge = 0.0
+                ev_pct = 0.0
+
+                if odds and isinstance(odds, dict):
                     if (
-                        a["confidence_pct"] >= 53.0
-                        and a["score_ml"] >= 19.5
-                        and not a["risk_flags"]["clima_extremo"]
-                        and not (
-                            a["ml_odds"] is not None
-                            and (a["ml_odds"] <= -320 or a["ml_odds"] >= 220)
-                        )
+                        pred["favorite"] == home
+                        and odds.get("home_moneyline") is not None
                     ):
-                        candidatos_fallback.append(a)
-                    else:
-                        motivo = "no_cumple_estricto_odds"
-            else:
-                if (
-                    a["confidence_pct"] >= 53.0
-                    and a["score_ml"] >= 19.5
-                    and not a["risk_flags"]["clima_extremo"]
-                ):
-                    candidatos_fallback.append(a)
-                else:
-                    motivo = "no_cumple_fallback_modelo"
+                        cuota = odds.get("home_moneyline")
+                    elif (
+                        pred["favorite"] == away
+                        and odds.get("away_moneyline") is not None
+                    ):
+                        cuota = odds.get("away_moneyline")
 
-            if motivo:
-                print("[PARLEY_DESCARTE]", a["game"], motivo)
+                    if cuota != "N/D":
+                        implied = moneyline_to_prob(cuota)
+                        if implied is not None:
+                            edge = round((pred["prob_favorite"] - implied) * 100, 1)
+                        ev_calc = calcular_ev(pred["prob_favorite"], cuota)
+                        if ev_calc is not None:
+                            ev_pct = round(ev_calc * 100, 2)
 
-        candidatos_estrictos = filtrar_matchups_unicos(candidatos_estrictos)
-        candidatos_fallback = filtrar_matchups_unicos(candidatos_fallback)
-        candidatos_estrictos.sort(
-            key=lambda x: (x["score_ml"], x["ev_ml_pct"]), reverse=True
-        )
-        candidatos_fallback.sort(
-            key=lambda x: (x["score_ml"], x["confidence_pct"]), reverse=True
-        )
-        print(
-            "[PARLEY_FASE] estricta=",
-            len(candidatos_estrictos),
-            "fallback=",
-            len(candidatos_fallback),
+                sesgo_local = (
+                    -2.5
+                    if pred["favorite"] == home and pred["confidence_pct"] <= 51.0
+                    else 0
+                )
+                score_final = (
+                    (pred["confidence_pct"] * 0.75)
+                    + (edge * 1.10)
+                    + (ev_pct * 1.25)
+                    + sesgo_local
+                )
+
+                candidatos.append(
+                    {
+                        "game": f"{away} @ {home}",
+                        "matchup_key": normalizar_matchup(away, home),
+                        "pick": f"{pred['favorite']} ML",
+                        "confidence": pred["confidence_pct"],
+                        "edge": edge,
+                        "ev_pct": ev_pct,
+                        "score_final": round(score_final, 2),
+                        "cuota": cuota,
+                        "is_home_pick": pred["favorite"] == home,
+                    }
+                )
+
+            except Exception as game_error:
+                print(f"Error procesando juego en /parley: {game_error}")
+                continue
+
+        candidatos = filtrar_matchups_unicos(candidatos)
+        candidatos.sort(
+            key=lambda x: (x["score_final"], x["confidence"], x["edge"], x["ev_pct"]),
+            reverse=True,
         )
 
-        seleccionados = candidatos_estrictos[:3]
-        uso_fallback = False
-        if len(seleccionados) < 2:
-            for c in candidatos_fallback:
+        seleccionados = []
+        home_count = 0
+
+        for c in candidatos:
+            if len(seleccionados) >= 3:
+                break
+            if any(s["matchup_key"] == c["matchup_key"] for s in seleccionados):
+                continue
+            if c["is_home_pick"] and home_count >= 2:
+                continue
+            seleccionados.append(c)
+            if c["is_home_pick"]:
+                home_count += 1
+
+        if len(seleccionados) < 3:
+            for c in candidatos:
                 if len(seleccionados) >= 3:
                     break
                 if any(s["matchup_key"] == c["matchup_key"] for s in seleccionados):
                     continue
+                if c in seleccionados:
+                    continue
                 seleccionados.append(c)
-                uso_fallback = True
-            print(
-                "[PARLEY_FASE] usando_fallback_moderado=",
-                uso_fallback,
-                "seleccionados=",
-                len(seleccionados),
-            )
 
         texto = header("PARLEY DEL DÍA MLB", "🎯")
         texto += f"📅 {hoy_str()}\n\n"
 
         if not seleccionados:
-            texto += "No hay picks conservadores de calidad hoy, incluso tras fallback moderado."
+            texto += "No hay juegos suficientes hoy."
         else:
-            if uso_fallback:
-                texto += "⚠️ Se usó fallback moderado del modelo por falta de cuotas suficientes.\n\n"
             for p in seleccionados:
                 texto += card_game(
-                    f"{p['away']} @ {p['home']}",
+                    p["game"],
                     [
-                        f"🎯 Pick: <b>{p['ml_pick']}</b>",
-                        f"🧠 Confianza: <b>{p['confidence_pct']}%</b>",
-                        f"📈 Edge: <b>{p['ml_edge_pct']}%</b> | EV: <b>{p['ev_ml_pct']}%</b>",
-                        f"💵 Cuota: <b>{p['ml_odds'] if p['ml_odds'] is not None else 'N/D'}</b>",
+                        f"🎯 Pick: <b>{p['pick']}</b>",
+                        f"🧠 Confianza: <b>{p['confidence']}%</b>",
+                        f"📈 Edge: <b>{p['edge']}%</b> | EV: <b>{p['ev_pct']}%</b>",
+                        f"💵 Cuota: <b>{p['cuota']}</b>",
                     ],
                 )
 
             legs = [
-                {
-                    "game": f"{p['away']} @ {p['home']}",
-                    "pick": p["ml_pick"],
-                    "confidence": p["confidence_pct"],
-                }
+                {"game": p["game"], "pick": p["pick"], "confidence": p["confidence"]}
                 for p in seleccionados
             ]
             registrar_parley_del_dia("parley", legs)
@@ -2085,6 +2136,9 @@ def parley(message):
         bot.edit_message_text(texto, msg.chat.id, msg.message_id, parse_mode="HTML")
 
     except Exception as e:
+        import traceback
+
+        print(traceback.format_exc())
         bot.edit_message_text(
             f"❌ Error en /parley: {str(e)[:120]}", msg.chat.id, msg.message_id
         )
