@@ -1781,5 +1781,786 @@ def apuestas(message):
             msg.message_id
         )
 
-# PARLEY FUNCTION FIX (PRO_FAL
-The document conte
+# PARLEY FUNCTION FIX (PRO_FALLBACK_V3)
+
+@bot.message_handler(commands=["parley", "parley_del_dia"])
+def parley(message):
+    msg = bot.reply_to(message, "🎯 Construyendo parley del día...")
+    try:
+        parley_existente = buscar_parley_del_dia("parley")
+        if parley_existente:
+            texto = header("PARLEY DEL DÍA (FIJO)", "🎯")
+            texto += f"📅 {parley_existente['fecha']}\n\n"
+            for leg in parley_existente.get("legs", []):
+                texto += card_game(
+                    leg["game"],
+                    [
+                        f"🎯 Pick: <b>{leg['pick']}</b>",
+                        f"🧠 Confianza: <b>{leg.get('confidence', 'N/D')}%</b>"
+                    ]
+                )
+            bot.edit_message_text(texto, msg.chat.id, msg.message_id, parse_mode="HTML")
+            return
+
+        standings = obtener_standings()
+        games = obtener_juegos_del_dia()
+        candidatos = []
+
+        for g in games:
+            try:
+                teams = g.get("teams", {})
+                away_data = teams.get("away", {})
+                home_data = teams.get("home", {})
+
+                away = away_data.get("team", {}).get("name")
+                home = home_data.get("team", {}).get("name")
+                if not away or not home:
+                    continue
+
+                away_pitcher_obj = away_data.get("probablePitcher", {}) or {}
+                home_pitcher_obj = home_data.get("probablePitcher", {}) or {}
+
+                away_p = away_pitcher_obj.get("fullName", "TBD")
+                home_p = home_pitcher_obj.get("fullName", "TBD")
+
+                away_pid = away_pitcher_obj.get("id")
+                home_pid = home_pitcher_obj.get("id")
+
+                away_stats = obtener_stats_pitcher_reales(away_pid)
+                home_stats = obtener_stats_pitcher_reales(home_pid)
+                weather = obtener_clima_partido(g) or {"temp_c": None, "wind_kmh": None, "precip_mm": None}
+
+                pred = obtener_pick_juego_pro(
+                    away, home, standings,
+                    away_p, home_p,
+                    away_stats, home_stats, weather
+                )
+
+                if pred["avoid"]:
+                    continue
+
+                odds = obtener_odds_completas(away, home)
+                cuota = "N/D"
+                edge = 0.0
+                ev_pct = 0.0
+
+                if odds and isinstance(odds, dict):
+                    if pred["favorite"] == home and odds.get("home_moneyline") is not None:
+                        cuota = odds.get("home_moneyline")
+                    elif pred["favorite"] == away and odds.get("away_moneyline") is not None:
+                        cuota = odds.get("away_moneyline")
+
+                    if cuota != "N/D":
+                        implied = moneyline_to_prob(cuota)
+                        if implied is not None:
+                            edge = round((pred["prob_favorite"] - implied) * 100, 1)
+                        ev_calc = calcular_ev(pred["prob_favorite"], cuota)
+                        if ev_calc is not None:
+                            ev_pct = round(ev_calc * 100, 2)
+
+                sesgo_local = -2.5 if pred["favorite"] == home and pred["confidence_pct"] <= 51.0 else 0
+                score_final = (pred["confidence_pct"] * 0.75) + (edge * 1.10) + (ev_pct * 1.25) + sesgo_local
+
+                candidatos.append({
+                    "game": f"{away} @ {home}",
+                    "matchup_key": normalizar_matchup(away, home),
+                    "pick": f"{pred['favorite']} ML",
+                    "confidence": pred["confidence_pct"],
+                    "edge": edge,
+                    "ev_pct": ev_pct,
+                    "score_final": round(score_final, 2),
+                    "cuota": cuota,
+                    "is_home_pick": pred["favorite"] == home
+                })
+
+            except Exception as game_error:
+                print(f"Error procesando juego en /parley: {game_error}")
+                continue
+
+        candidatos = filtrar_matchups_unicos(candidatos)
+        candidatos.sort(key=lambda x: (x["score_final"], x["confidence"], x["edge"], x["ev_pct"]), reverse=True)
+
+        seleccionados = []
+        home_count = 0
+
+        for c in candidatos:
+            if len(seleccionados) >= 3:
+                break
+            if any(s["matchup_key"] == c["matchup_key"] for s in seleccionados):
+                continue
+            if c["is_home_pick"] and home_count >= 2:
+                continue
+            seleccionados.append(c)
+            if c["is_home_pick"]:
+                home_count += 1
+
+        if len(seleccionados) < 3:
+            for c in candidatos:
+                if len(seleccionados) >= 3:
+                    break
+                if any(s["matchup_key"] == c["matchup_key"] for s in seleccionados):
+                    continue
+                if c in seleccionados:
+                    continue
+                seleccionados.append(c)
+
+        texto = header("PARLEY DEL DÍA MLB", "🎯")
+        texto += f"📅 {hoy_str()}\n\n"
+
+        if not seleccionados:
+            texto += "No hay juegos suficientes hoy."
+        else:
+            for p in seleccionados:
+                texto += card_game(
+                    p["game"],
+                    [
+                        f"🎯 Pick: <b>{p['pick']}</b>",
+                        f"🧠 Confianza: <b>{p['confidence']}%</b>",
+                        f"📈 Edge: <b>{p['edge']}%</b> | EV: <b>{p['ev_pct']}%</b>",
+                        f"💵 Cuota: <b>{p['cuota']}</b>"
+                    ]
+                )
+
+            legs = [{"game": p["game"], "pick": p["pick"], "confidence": p["confidence"]} for p in seleccionados]
+            registrar_parley_del_dia("parley", legs)
+
+        bot.edit_message_text(texto, msg.chat.id, msg.message_id, parse_mode="HTML")
+
+    except Exception as e:
+        import traceback
+        print(traceback.format_exc())
+        bot.edit_message_text(f"❌ Error en /parley: {str(e)[:120]}", msg.chat.id, msg.message_id)
+
+
+@bot.message_handler(commands=["posiciones"])
+def posiciones(message):
+    msg = bot.reply_to(message, "🏆 Cargando standings estilo ESPN...")
+    try:
+        season = temporada_actual()
+        url = f"{MLB_BASE}/standings"
+        params = {
+            "leagueId": "103,104",
+            "season": season,
+            "standingsTypes": "regularSeason"
+        }
+
+        data = safe_get(url, params=params)
+        records = data.get("records", [])
+
+        if not records:
+            bot.edit_message_text(
+                "❌ No pude cargar los standings.",
+                msg.chat.id,
+                msg.message_id
+            )
+            return
+
+        bloques = []
+        titulo = f"🏆 <b>STANDINGS MLB {season}</b>\n"
+
+        for record in records:
+            league_name = record.get("league", {}).get("name", "League")
+            division_name = record.get("division", {}).get("name", "División")
+
+            if "Spring" in division_name or "Wild Card" in division_name:
+                continue
+
+            lineas = [
+                f"{league_name} - {division_name}",
+                "",
+                "Team                 W   L   PCT   GB   HOME   AWAY   L10   STRK",
+                "---------------------------------------------------------------"
+            ]
+
+            for team in record.get("teamRecords", []):
+                nombre = team.get("team", {}).get("name", "")
+                wins = team.get("wins", 0)
+                losses = team.get("losses", 0)
+                pct = team.get("pct", "---")
+                gb = str(team.get("gamesBack", "-"))
+                home = f"{team.get('homeWins', 0)}-{team.get('homeLosses', 0)}"
+                away = f"{team.get('awayWins', 0)}-{team.get('awayLosses', 0)}"
+                l10 = f"{team.get('lastTenWins', 0)}-{team.get('lastTenLosses', 0)}"
+                strk = str(team.get("streakCode", "-"))
+
+                fila = (
+                    f"{nombre[:20].ljust(20)} "
+                    f"{str(wins).rjust(3)} "
+                    f"{str(losses).rjust(3)} "
+                    f"{str(pct).rjust(5)} "
+                    f"{gb.rjust(4)} "
+                    f"{home.rjust(6)} "
+                    f"{away.rjust(6)} "
+                    f"{l10.rjust(5)} "
+                    f"{strk.rjust(5)}"
+                )
+                lineas.append(fila)
+
+            bloques.append("<pre>" + "\n".join(lineas) + "</pre>")
+
+        bot.delete_message(msg.chat.id, msg.message_id)
+        bot.send_message(message.chat.id, titulo, parse_mode="HTML")
+
+        for bloque in bloques:
+            bot.send_message(message.chat.id, bloque, parse_mode="HTML")
+
+    except Exception as e:
+        bot.edit_message_text(
+            f"❌ Error al cargar posiciones: {str(e)[:120]}",
+            msg.chat.id,
+            msg.message_id
+        )
+        
+@bot.message_handler(commands=["reset_millonario"])
+def reset_millonario(message):
+    try:
+        borrado = eliminar_parley_del_dia("parley_millonario")
+
+        if borrado:
+            bot.reply_to(message, "♻️ Parley millonario del día reiniciado correctamente.")
+        else:
+            bot.reply_to(message, "No había parley millonario guardado hoy.")
+    except Exception as e:
+        bot.reply_to(message, f"❌ Error al resetear millonario: {str(e)[:120]}")
+@bot.message_handler(commands=["parley_millonario"])
+def parley_millonario(message):
+    msg = bot.reply_to(message, "💎 Construyendo parley millonario del día...")
+    try:
+        parley_existente = buscar_parley_del_dia("parley_millonario")
+        if parley_existente:
+            texto = header("PARLEY MILLONARIO (FIJO)", "💎")
+            texto += f"📅 {parley_existente['fecha']}\n\n"
+            for leg in parley_existente.get("legs", []):
+                texto += card_game(
+                    leg["game"],
+                    [
+                        f"🔥 Pick: <b>{leg['pick']}</b>",
+                        f"🧠 Confianza: <b>{leg.get('confidence', 'N/D')}%</b>"
+                    ]
+                )
+            bot.edit_message_text(texto, msg.chat.id, msg.message_id, parse_mode="HTML")
+            return
+
+        # =========================================
+        # BLOQUEAR TODOS LOS JUEGOS DEL PARLEY DIARIO
+        # =========================================
+        parley_diario = buscar_parley_del_dia("parley")
+        matchups_bloqueados = set()
+
+        if parley_diario:
+            for leg in parley_diario.get("legs", []):
+                game = leg.get("game", "")
+                if " @ " in game:
+                    away, home = game.split(" @ ", 1)
+                    matchups_bloqueados.add(normalizar_matchup(away, home))
+
+        standings = obtener_standings()
+        games = obtener_juegos_del_dia()
+
+        candidatos_ml = []
+        candidatos_totals = []
+
+        for g in games:
+            try:
+                teams = g.get("teams", {})
+                away_data = teams.get("away", {})
+                home_data = teams.get("home", {})
+
+                away = away_data.get("team", {}).get("name")
+                home = home_data.get("team", {}).get("name")
+                if not away or not home:
+                    continue
+
+                matchup_key = normalizar_matchup(away, home)
+
+                # 🔴 BLOQUEO TOTAL:
+                # Si ese juego ya está en /parley, no entra aquí ni ML ni Total
+                if matchup_key in matchups_bloqueados:
+                    continue
+
+                away_pitcher_obj = away_data.get("probablePitcher", {}) or {}
+                home_pitcher_obj = home_data.get("probablePitcher", {}) or {}
+
+                away_p = away_pitcher_obj.get("fullName", "TBD")
+                home_p = home_pitcher_obj.get("fullName", "TBD")
+
+                away_pid = away_pitcher_obj.get("id")
+                home_pid = home_pitcher_obj.get("id")
+
+                away_stats = obtener_stats_pitcher_reales(away_pid)
+                home_stats = obtener_stats_pitcher_reales(home_pid)
+
+                weather = obtener_clima_partido(g) or {
+                    "temp_c": None,
+                    "wind_kmh": None,
+                    "precip_mm": None
+                }
+
+                pred = obtener_pick_juego_pro(
+                    away, home, standings,
+                    away_p, home_p,
+                    away_stats, home_stats, weather
+                )
+
+                total_proj = estimar_total_juego_pro(
+                    away, home, standings,
+                    away_p, home_p,
+                    away_stats, home_stats, weather
+                )
+
+                odds = obtener_odds_completas(away, home)
+
+                # =========================================
+                # CANDIDATO ML
+                # =========================================
+                if not pred["avoid"]:
+                    cuota_ml = "N/D"
+                    edge_ml = 0.0
+
+                    if odds and isinstance(odds, dict):
+                        if pred["favorite"] == home and odds.get("home_moneyline") is not None:
+                            cuota_ml = odds.get("home_moneyline")
+                        elif pred["favorite"] == away and odds.get("away_moneyline") is not None:
+                            cuota_ml = odds.get("away_moneyline")
+
+                        if cuota_ml != "N/D":
+                            implied_ml = moneyline_to_prob(cuota_ml)
+                            if implied_ml is not None:
+                                edge_ml = round((pred["prob_favorite"] - implied_ml) * 100, 1)
+
+                    penalizacion_local = 0.0
+                    if pred["favorite"] == home and pred["confidence_pct"] <= 51.0:
+                        penalizacion_local = -3.0
+
+                    score_ml = (
+                        pred["confidence_pct"] * 0.85
+                        + edge_ml * 0.90
+                        + penalizacion_local
+                    )
+
+                    candidatos_ml.append({
+                        "tipo": "ML",
+                        "game": f"{away} @ {home}",
+                        "matchup_key": matchup_key,
+                        "pick": f"{pred['favorite']} ML",
+                        "confidence": pred["confidence_pct"],
+                        "edge": edge_ml,
+                        "score": round(score_ml, 2),
+                        "cuota": cuota_ml,
+                        "is_home_pick": pred["favorite"] == home
+                    })
+
+                # =========================================
+                # CANDIDATO TOTAL
+                # =========================================
+                total_pick = None
+                cuota_total = "N/D"
+
+                # Si hay línea real de totals, la usamos
+                if odds and isinstance(odds, dict) and odds.get("total_line") is not None:
+                    total_pick = elegir_total_pick(total_proj, odds.get("total_line"))
+                    if total_pick:
+                        cuota_total = odds.get("over_price") if "Over" in total_pick["pick"] else odds.get("under_price")
+
+                # Si no hay línea real o no salió pick, forzamos según proyección
+                if total_pick is None:
+                    if total_proj >= 9.2:
+                        total_pick = {
+                            "pick": "Over 8.5",
+                            "edge": round(abs(total_proj - 8.5), 2),
+                            "strength": "Forzado"
+                        }
+                    elif total_proj <= 7.8:
+                        total_pick = {
+                            "pick": "Under 8.5",
+                            "edge": round(abs(total_proj - 8.5), 2),
+                            "strength": "Forzado"
+                        }
+                    else:
+                        total_pick = elegir_total_pick_fallback(total_proj)
+
+                if total_pick:
+                    score_total = (
+                        abs(total_pick["edge"]) * 3.4
+                        + pred["confidence_pct"] * 0.45
+                    )
+
+                    candidatos_totals.append({
+                        "tipo": "TOTAL",
+                        "game": f"{away} @ {home}",
+                        "matchup_key": matchup_key,
+                        "pick": total_pick["pick"],
+                        "confidence": pred["confidence_pct"],
+                        "edge": round(abs(total_pick["edge"]), 2),
+                        "score": round(score_total, 2),
+                        "cuota": cuota_total
+                    })
+
+            except Exception as game_error:
+                print(f"Error procesando juego en /parley_millonario: {game_error}")
+                continue
+
+        candidatos_ml = filtrar_matchups_unicos(candidatos_ml)
+        candidatos_totals = filtrar_matchups_unicos(candidatos_totals)
+
+        candidatos_ml.sort(
+            key=lambda x: (x["score"], x["confidence"], x["edge"]),
+            reverse=True
+        )
+        candidatos_totals.sort(
+            key=lambda x: (x["score"], x["edge"], x["confidence"]),
+            reverse=True
+        )
+
+        seleccionados = []
+
+        # =========================================
+        # 1) FORZAR 3 TOTALS
+        # =========================================
+        for c in candidatos_totals:
+            if len([x for x in seleccionados if x["tipo"] == "TOTAL"]) >= 3:
+                break
+            if any(s["matchup_key"] == c["matchup_key"] for s in seleccionados):
+                continue
+            seleccionados.append(c)
+
+        # =========================================
+        # 2) FORZAR 2 ML
+        # =========================================
+        home_ml_count = 0
+        for c in candidatos_ml:
+            if len([x for x in seleccionados if x["tipo"] == "ML"]) >= 2:
+                break
+            if any(s["matchup_key"] == c["matchup_key"] for s in seleccionados):
+                continue
+
+            # evita 2 locales flojos
+            if c["is_home_pick"] and c["confidence"] <= 51.0 and home_ml_count >= 1:
+                continue
+
+            seleccionados.append(c)
+            if c["is_home_pick"]:
+                home_ml_count += 1
+
+        # =========================================
+        # 3) FALLBACK HASTA 5
+        # =========================================
+        if len(seleccionados) < 5:
+            mezclados = sorted(
+                candidatos_totals + candidatos_ml,
+                key=lambda x: (x["score"], x["confidence"]),
+                reverse=True
+            )
+            for c in mezclados:
+                if len(seleccionados) >= 5:
+                    break
+                if any(s["matchup_key"] == c["matchup_key"] for s in seleccionados):
+                    continue
+                seleccionados.append(c)
+
+        # mostrar totals primero, luego ML
+        seleccionados = sorted(
+            seleccionados[:5],
+            key=lambda x: (0 if x["tipo"] == "TOTAL" else 1, -x["score"])
+        )
+
+        texto = header("PARLEY MILLONARIO 5 PICKS", "💎")
+        texto += f"📅 {hoy_str()}\n\n"
+
+        if not seleccionados:
+            texto += "No hay juegos suficientes hoy."
+        else:
+            for p in seleccionados:
+                texto += card_game(
+                    p["game"],
+                    [
+                        f"🔥 {p['tipo']}: <b>{p['pick']}</b>",
+                        f"🧠 Confianza: <b>{p['confidence']}%</b>",
+                        f"📈 Edge: <b>{p['edge']}</b>",
+                        f"💵 Cuota: <b>{p['cuota']}</b>"
+                    ]
+                )
+
+            legs = [
+                {
+                    "game": p["game"],
+                    "pick": p["pick"],
+                    "confidence": p["confidence"]
+                }
+                for p in seleccionados
+            ]
+            registrar_parley_del_dia("parley_millonario", legs)
+
+        bot.edit_message_text(texto, msg.chat.id, msg.message_id, parse_mode="HTML")
+
+    except Exception as e:
+        import traceback
+        print(traceback.format_exc())
+        bot.edit_message_text(
+            f"❌ Error en /parley_millonario: {str(e)[:120]}",
+            msg.chat.id,
+            msg.message_id
+        )
+@bot.message_handler(commands=["pronosticos"])
+def pronosticos(message):
+    msg = bot.reply_to(message, "📊 Generando pronósticos del modelo...")
+    try:
+        standings = obtener_standings()
+        games = obtener_juegos_del_dia()
+
+        texto = header("PRONÓSTICOS DEL MODELO", "📊")
+        texto += f"📅 {hoy_str()}\n\n"
+
+        if not games:
+            texto += "No hay juegos hoy."
+            bot.edit_message_text(texto, msg.chat.id, msg.message_id)
+            return
+
+        picks = []
+
+        for g in games:
+            teams = g.get("teams", {})
+            away_data = teams.get("away", {})
+            home_data = teams.get("home", {})
+
+            away = away_data.get("team", {}).get("name")
+            home = home_data.get("team", {}).get("name")
+            if not away or not home:
+                continue
+
+            away_pitcher_obj = away_data.get("probablePitcher", {}) or {}
+            home_pitcher_obj = home_data.get("probablePitcher", {}) or {}
+            away_p = away_pitcher_obj.get("fullName", "TBD")
+            home_p = home_pitcher_obj.get("fullName", "TBD")
+            away_pid = away_pitcher_obj.get("id")
+            home_pid = home_pitcher_obj.get("id")
+
+            away_stats = obtener_stats_pitcher_reales(away_pid)
+            home_stats = obtener_stats_pitcher_reales(home_pid)
+            weather = obtener_clima_partido(g) or {"temp_c": None, "wind_kmh": None, "precip_mm": None}
+
+            pred = obtener_pick_juego_pro(away, home, standings, away_p, home_p, away_stats, home_stats, weather)
+
+            picks.append({
+                "game": f"{away} @ {home}",
+                "pick": f"{pred['favorite']} ML",
+                "conf": pred["confidence_pct"]
+            })
+
+        picks.sort(key=lambda x: x["conf"], reverse=True)
+
+        for p in picks[:8]:
+            texto += card_game(
+                p["game"],
+                [
+                    f"🎯 Pick: <b>{p['pick']}</b>",
+                    f"🧠 Confianza: <b>{p['conf']}%</b>"
+                ]
+            )
+
+        bot.edit_message_text(texto, msg.chat.id, msg.message_id, parse_mode="HTML")
+    except Exception as e:
+        bot.edit_message_text(f"❌ Error: {str(e)[:120]}", msg.chat.id, msg.message_id)
+
+
+@bot.message_handler(commands=["exportar_json"])
+def exportar_json(message):
+    msg = bot.reply_to(message, "📦 Generando archivo JSON maestro para TikTok...")
+    try:
+        data = generar_dataset_tiktok()
+        ruta = guardar_json_tiktok(data)
+
+        if not ruta:
+            bot.edit_message_text(
+                "❌ No se pudo guardar el archivo JSON.",
+                msg.chat.id,
+                msg.message_id
+            )
+            return
+
+        total_juegos = len(data.get("juegos_del_dia", []))
+        total_pronosticos = len(data.get("pronosticos", []))
+        total_ml = len(data.get("apuestas", {}).get("moneyline_ev", []))
+        total_totales = len(data.get("apuestas", {}).get("totales_ev", []))
+        total_parley = len(data.get("parley", []))
+        total_millonario = len(data.get("parley_millonario", []))
+
+        texto = (
+            "✅ <b>JSON maestro generado correctamente</b>\n\n"
+            f"📅 Fecha: <b>{data['fecha']}</b>\n"
+            f"🤖 Versión: <b>{data['bot_version']}</b>\n"
+            f"⚾ Juegos del día: <b>{total_juegos}</b>\n"
+            f"📊 Pronósticos: <b>{total_pronosticos}</b>\n"
+            f"💰 ML EV+: <b>{total_ml}</b>\n"
+            f"📈 Totales EV+: <b>{total_totales}</b>\n"
+            f"🎯 Parley: <b>{total_parley}</b>\n"
+            f"💎 Parley millonario: <b>{total_millonario}</b>\n\n"
+            f"📂 Guardado en:\n<code>{ruta}</code>"
+        )
+
+        bot.edit_message_text(texto, msg.chat.id, msg.message_id, parse_mode="HTML")
+
+    except Exception as e:
+        import traceback
+        print(traceback.format_exc())
+        bot.edit_message_text(
+            f"❌ Error en /exportar_json: {str(e)[:180]}",
+            msg.chat.id,
+            msg.message_id
+        )
+
+
+@bot.message_handler(commands=["lesionados"])
+def lesionados(message):
+    msg = bot.reply_to(message, "🚨 Cargando lesionados...")
+    try:
+        transactions = obtener_transacciones_hoy()
+        texto = header("LESIONADOS / IL RECIENTES", "🚨")
+
+        count = 0
+        for t in transactions:
+            desc = str(t.get("description", ""))
+            lower = desc.lower()
+
+            if any(x in lower for x in ["injured", "il", "injury", "60-day", "15-day", "10-day", "placed on"]):
+                texto += f"• {desc}\n"
+                count += 1
+                if count >= 15:
+                    break
+
+        if count == 0:
+            texto += "No encontré movimientos importantes de IL recientemente."
+
+        bot.delete_message(msg.chat.id, msg.message_id)
+        responder_largo(message.chat.id, texto, parse_mode="HTML")
+    except Exception as e:
+        bot.edit_message_text(f"❌ Error al cargar lesionados: {str(e)[:120]}", msg.chat.id, msg.message_id)
+
+
+@bot.message_handler(commands=["lineups"])
+def lineups(message):
+    texto = (
+        "📋 <b>LINEUPS</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        "Las alineaciones oficiales suelen salir entre 1 y 2 horas antes del primer juego.\n\n"
+        "Mientras tanto usa:\n"
+        "• /pitchers\n"
+        "• /lesionados\n"
+        "• /hoy"
+    )
+    bot.reply_to(message, texto, parse_mode="HTML")
+
+
+@bot.message_handler(commands=["roi"])
+def roi(message):
+    try:
+        if not os.path.exists(RESULTADOS_CSV):
+            bot.reply_to(message, "No existe el archivo de resultados todavía.")
+            return
+
+        total_apuestas = 0
+        total_unidades = 0.0
+        total_profit = 0.0
+        ganadas = 0
+        perdidas = 0
+
+        with open(RESULTADOS_CSV, "r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                resultado = str(row.get("resultado", "")).strip().lower()
+                profit = row.get("profit", "")
+                stake = row.get("stake", "")
+
+                if resultado in ["win", "lose"] and profit not in ["", None]:
+                    total_apuestas += 1
+                    total_unidades += extraer_unidades(stake)
+                    total_profit += float(profit)
+
+                    if resultado == "win":
+                        ganadas += 1
+                    elif resultado == "lose":
+                        perdidas += 1
+
+        if total_apuestas == 0 or total_unidades == 0:
+            bot.reply_to(message, "Todavía no hay apuestas cerradas en el CSV para calcular ROI.")
+            return
+
+        roi_pct = round((total_profit / total_unidades) * 100, 2)
+        hit_rate = round((ganadas / total_apuestas) * 100, 2)
+
+        texto = header("RESUMEN ROI", "📈")
+        texto += (
+            f"🎯 Apuestas cerradas: <b>{total_apuestas}</b>\n"
+            f"✅ Ganadas: <b>{ganadas}</b>\n"
+            f"❌ Perdidas: <b>{perdidas}</b>\n"
+            f"📊 Hit Rate: <b>{hit_rate}%</b>\n"
+            f"💵 Unidades arriesgadas: <b>{round(total_unidades, 2)}u</b>\n"
+            f"💰 Profit neto: <b>{round(total_profit, 2)}u</b>\n"
+            f"🚀 ROI: <b>{roi_pct}%</b>\n"
+        )
+
+        bot.reply_to(message, texto, parse_mode="HTML")
+
+    except Exception as e:
+        bot.reply_to(message, f"❌ Error calculando ROI: {str(e)[:120]}")
+
+
+
+@bot.message_handler(commands=["parley_ganado"])
+def parley_ganado(message):
+    ok = actualizar_estado_parley(hoy_str(), "parley", "ganado")
+    bot.reply_to(message, "✅ Parley del día marcado como GANADO." if ok else "❌ No encontré parley del día para marcar.")
+
+@bot.message_handler(commands=["parley_fallado"])
+def parley_fallado(message):
+    ok = actualizar_estado_parley(hoy_str(), "parley", "fallado")
+    bot.reply_to(message, "❌ Parley del día marcado como FALLADO." if ok else "❌ No encontré parley del día para marcar.")
+
+@bot.message_handler(commands=["millonario_ganado"])
+def millonario_ganado(message):
+    ok = actualizar_estado_parley(hoy_str(), "parley_millonario", "ganado")
+    bot.reply_to(message, "✅ Parley millonario marcado como GANADO." if ok else "❌ No encontré parley millonario del día.")
+
+@bot.message_handler(commands=["millonario_fallado"])
+def millonario_fallado(message):
+    ok = actualizar_estado_parley(hoy_str(), "parley_millonario", "fallado")
+    bot.reply_to(message, "❌ Parley millonario marcado como FALLADO." if ok else "❌ No encontré parley millonario del día.")
+
+@bot.message_handler(commands=["stats_parleys"])
+def stats_parleys(message):
+    parleys = cargar_parleys_diarios()
+    stats = {
+        "parley": {"ganado": 0, "fallado": 0},
+        "parley_millonario": {"ganado": 0, "fallado": 0}
+    }
+
+    for p in parleys:
+        tipo = p.get("tipo")
+        estado = p.get("estado")
+        if tipo in stats and estado in ["ganado", "fallado"]:
+            stats[tipo][estado] += 1
+
+    total_parley = stats["parley"]["ganado"] + stats["parley"]["fallado"]
+    total_millonario = stats["parley_millonario"]["ganado"] + stats["parley_millonario"]["fallado"]
+    efectividad_parley = round((stats["parley"]["ganado"] / total_parley) * 100, 2) if total_parley > 0 else 0
+    efectividad_millonario = round((stats["parley_millonario"]["ganado"] / total_millonario) * 100, 2) if total_millonario > 0 else 0
+
+    texto = header("ESTADÍSTICAS DE PARLEYS", "📊")
+    texto += (
+        f"🎯 <b>Parley diario</b>\n"
+        f"✅ Ganados: <b>{stats['parley']['ganado']}</b>\n"
+        f"❌ Fallados: <b>{stats['parley']['fallado']}</b>\n"
+        f"📈 Efectividad: <b>{efectividad_parley}%</b>\n\n"
+        f"💎 <b>Parley millonario</b>\n"
+        f"✅ Ganados: <b>{stats['parley_millonario']['ganado']}</b>\n"
+        f"❌ Fallados: <b>{stats['parley_millonario']['fallado']}</b>\n"
+        f"📈 Efectividad: <b>{efectividad_millonario}%</b>\n"
+    )
+    bot.reply_to(message, texto, parse_mode="HTML")
+
+
+import time
+print(f"INICIANDO BOT {BOT_VERSION}")
+bot.remove_webhook()
+time.sleep(1)
+bot.infinity_polling(skip_pending=True, timeout=30, long_polling_timeout=30, allowed_updates=["message", "callback_query"])
