@@ -18,7 +18,7 @@ except ImportError:
 # =========================================================
 # VERSION
 # =========================================================
-BOT_VERSION = "V7_CLEAN"
+BOT_VERSION = "V7_2_MILL_5PICKS"
 
 # =========================================================
 # CONFIG
@@ -1378,12 +1378,25 @@ def calcular_parley_del_dia(analisis_juegos):
 def calcular_parley_millonario(analisis_juegos, matchups_bloqueados):
     """
     5 legs agresivos. Excluye matchups del parley diario.
-    Permite ML + TOTAL del mismo partido (clave por tipo).
+
+    DEDUPLICACIÓN: clave (matchup_key, tipo).
+    Un partido puede aparecer con ML Y TOTAL al mismo tiempo (comportamiento correcto).
+    Nunca dos ML ni dos TOTAL del mismo partido.
+    Siempre intenta completar 5 picks pasando por 4 pools de menor a mayor permisividad.
     """
-    disponibles     = [a for a in analisis_juegos if a["matchup_key"] not in matchups_bloqueados and not a["risk_flags"]["tbd_pitcher"]]
-    disponibles_tbd = [a for a in analisis_juegos if a["matchup_key"] not in matchups_bloqueados]
+    disponibles     = [a for a in analisis_juegos
+                       if a["matchup_key"] not in matchups_bloqueados
+                       and not a["risk_flags"]["tbd_pitcher"]]
+    disponibles_tbd = [a for a in analisis_juegos
+                       if a["matchup_key"] not in matchups_bloqueados]
 
     def construir_pool(juegos, ml_conf, ml_ev, ml_edge, tot_edge, tot_ev, aceptar_nd=False):
+        """
+        Genera candidatos ML y TOTAL por separado.
+        Para cada partido, si califica como ML Y como TOTAL,
+        ambos entran al pool con sus scores respectivos.
+        La selección final decide cuál se usa (1 por partido).
+        """
         candidatos = []
         for a in juegos:
             conf     = a["confidence_pct"]
@@ -1391,73 +1404,91 @@ def calcular_parley_millonario(analisis_juegos, matchups_bloqueados):
             ml       = a["ml_odds"]
             extrema  = ml is not None and (ml <= -300 or ml >= 250)
 
+            # Candidato ML
             if not extrema:
                 if has_odds and conf >= ml_conf and a["ev_ml_pct"] >= ml_ev and a["ml_edge_pct"] >= ml_edge:
-                    candidatos.append({"tipo": "ML", "game": f"{a['away']} @ {a['home']}",
-                                       "matchup_key": a["matchup_key"], "pick": a["ml_pick"],
-                                       "confidence": conf, "edge": a["ml_edge_pct"],
-                                       "score": a["score_agresivo"], "cuota": ml,
-                                       "is_home": a["is_home_pick"]})
+                    candidatos.append({
+                        "tipo": "ML", "game": f"{a['away']} @ {a['home']}",
+                        "matchup_key": a["matchup_key"], "pick": a["ml_pick"],
+                        "confidence": conf, "edge": a["ml_edge_pct"],
+                        "score": a["score_agresivo"], "cuota": ml,
+                        "is_home": a["is_home_pick"],
+                    })
                 elif aceptar_nd and conf >= max(ml_conf - 1.5, 51.0):
-                    candidatos.append({"tipo": "ML", "game": f"{a['away']} @ {a['home']}",
-                                       "matchup_key": a["matchup_key"], "pick": a["ml_pick"],
-                                       "confidence": conf, "edge": a["ml_edge_pct"],
-                                       "score": a["score_agresivo"] - 2.0, "cuota": ml or "N/D",
-                                       "is_home": a["is_home_pick"]})
+                    candidatos.append({
+                        "tipo": "ML", "game": f"{a['away']} @ {a['home']}",
+                        "matchup_key": a["matchup_key"], "pick": a["ml_pick"],
+                        "confidence": conf, "edge": a["ml_edge_pct"],
+                        "score": a["score_agresivo"] - 2.0, "cuota": ml or "N/D",
+                        "is_home": a["is_home_pick"],
+                    })
 
+            # Candidato TOTAL
             if a.get("total_pick") and a["total_edge"] >= tot_edge:
                 if a["ev_total_pct"] >= tot_ev or (aceptar_nd and a["score_total"] >= 20.0):
                     cuota_t = a["total_odds"] if a["total_odds"] is not None else "N/D"
                     if cuota_t != "N/D" or aceptar_nd:
-                        candidatos.append({"tipo": "TOTAL", "game": f"{a['away']} @ {a['home']}",
-                                           "matchup_key": a["matchup_key"], "pick": a["total_pick"]["pick"],
-                                           "confidence": conf, "edge": a["total_edge"],
-                                           "score": a["score_agresivo"] + 1.5, "cuota": cuota_t,
-                                           "is_home": False})
+                        candidatos.append({
+                            "tipo": "TOTAL", "game": f"{a['away']} @ {a['home']}",
+                            "matchup_key": a["matchup_key"], "pick": a["total_pick"]["pick"],
+                            "confidence": conf, "edge": a["total_edge"],
+                            "score": a["score_agresivo"] + 1.5, "cuota": cuota_t,
+                            "is_home": False,
+                        })
 
-        candidatos = filtrar_candidatos_millonario(
-            sorted(candidatos, key=lambda x: x["score"], reverse=True)
-        )
+        # Ordenar por score descendente; NO deduplicar aquí para preservar
+        # ambas opciones (ML y TOTAL) del mismo partido — la selección final
+        # garantiza 1 pick por partido.
+        candidatos.sort(key=lambda x: x["score"], reverse=True)
         return candidatos
 
     pools = [
         construir_pool(disponibles,     52.5, 0.5, 0.8, 0.60, 0.8, False),
         construir_pool(disponibles,     51.5, 0.0, 0.0, 0.45, 0.0, True),
         construir_pool(disponibles_tbd, 51.0, 0.0, 0.0, 0.35, 0.0, True),
-        filtrar_candidatos_millonario(
-            sorted([{"tipo": "ML", "game": f"{a['away']} @ {a['home']}",
-                     "matchup_key": a["matchup_key"], "pick": a["ml_pick"],
-                     "confidence": a["confidence_pct"], "edge": a["ml_edge_pct"],
-                     "score": a["score_agresivo"], "cuota": a["ml_odds"] or "N/D",
-                     "is_home": a["is_home_pick"]}
-                    for a in disponibles_tbd],
-                   key=lambda x: x["confidence"], reverse=True)
+        # Pool de emergencia: solo ML ordenado por confianza
+        sorted(
+            [{"tipo": "ML", "game": f"{a['away']} @ {a['home']}",
+              "matchup_key": a["matchup_key"], "pick": a["ml_pick"],
+              "confidence": a["confidence_pct"], "edge": a["ml_edge_pct"],
+              "score": a["score_agresivo"], "cuota": a["ml_odds"] or "N/D",
+              "is_home": a["is_home_pick"]}
+             for a in disponibles_tbd],
+            key=lambda x: x["confidence"], reverse=True,
         ),
     ]
 
-    seleccionados  = []
-    vistos_mk_tipo = set()
-    home_ml_count  = 0
-    nivel_usado    = "ninguno"
+    seleccionados    = []
+    # Clave (matchup_key, tipo): permite ML + TOTAL del mismo partido (comportamiento confirmado correcto)
+    vistos_mk_tipo   = set()
+    home_ml_count    = 0
+    nivel_usado      = "ninguno"
 
     for idx, pool in enumerate(pools):
         for c in pool:
             if len(seleccionados) >= 5:
                 break
+
             clave = (c["matchup_key"], c["tipo"])
             if clave in vistos_mk_tipo:
                 continue
+
+            # No saturar de locales de baja confianza
             if c["tipo"] == "ML" and c.get("is_home") and c["confidence"] < 54 and home_ml_count >= 2:
                 continue
-            if c.get("cuota") == "N/D" and len(seleccionados) >= 4:
-                continue
+
             vistos_mk_tipo.add(clave)
             seleccionados.append(c)
+
             if c["tipo"] == "ML" and c.get("is_home"):
                 home_ml_count += 1
+
         if len(seleccionados) >= 5:
             nivel_usado = ["estricto", "fallback_A", "fallback_B", "emergencia"][idx]
             break
+
+    if nivel_usado == "ninguno" and seleccionados:
+        nivel_usado = "emergencia"
 
     return seleccionados, nivel_usado
 
